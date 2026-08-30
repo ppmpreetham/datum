@@ -1,4 +1,5 @@
 import { Canvas } from "@react-three/fiber";
+import { OrbitControls } from "@react-three/drei";
 
 export default function Experience() {
   return (
@@ -8,7 +9,12 @@ export default function Experience() {
         <meshPhongMaterial />
       </mesh>
       <ambientLight intensity={0.1} />
-      <directionalLight position={[0, 0, 5]} color="white" />
+      <directionalLight
+        position={[0, 0, 5]}
+        rotation={[0, Math.PI / 4, Math.PI / 4]}
+        color="white"
+      />
+      <OrbitControls />
     </Canvas>
   );
 }
