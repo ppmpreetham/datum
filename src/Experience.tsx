@@ -2,13 +2,14 @@ import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { Bloom, EffectComposer, LensFlare, Noise, Vignette } from "@react-three/postprocessing";
 import { useEffect, useState } from "react";
+import { DroneModel } from "./components/models/drone";
 
 const getDevicePixelRatio = () => {
   return Math.min(1, window.devicePixelRatio);
 };
 
 export default function Experience() {
-  const [dpr, setDpr] = useState(getDevicePixelRatio());
+  const dpr = getDevicePixelRatio();
   const [frameloop, setFrameloop] = useState<"always" | "never">("always");
 
   useEffect(() => {
@@ -36,13 +37,13 @@ export default function Experience() {
         <Bloom luminanceThreshold={0.9} luminanceSmoothing={0.9} height={300} />
         <Noise opacity={0.02} />
         <Vignette eskil={false} offset={0.1} darkness={1.1} />
-        <LensFlare />
+        <LensFlare opacity={0.5} />
       </EffectComposer>
-
-      <mesh>
+      <DroneModel />
+      {/*<mesh>
         <boxGeometry args={[2, 2, 2]} />
         <meshPhongMaterial color="white" />
-      </mesh>
+      </mesh>*/}
 
       <ambientLight intensity={0.5} />
       <directionalLight position={[5, 5, 5]} color="white" intensity={1.5} />
