@@ -1,8 +1,8 @@
-import App from "./App";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree";
+import { RouterProvider } from "@tanstack/react-router";
 
 export const router = createRouter({
   routeTree,
@@ -18,6 +18,7 @@ declare module "@tanstack/react-router" {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    {/*<App />*/}
+    <RouterProvider router={router} />
   </React.StrictMode>,
 );

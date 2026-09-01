@@ -1,8 +1,8 @@
 import { Canvas } from "@react-three/fiber";
-import { OrbitControls } from "@react-three/drei";
 import { Bloom, EffectComposer, LensFlare, Noise, Vignette } from "@react-three/postprocessing";
 import { useEffect, useState } from "react";
 import { DroneModel } from "./components/models/drone";
+import { Trail } from "@react-three/drei";
 
 const getDevicePixelRatio = () => {
   return Math.min(1, window.devicePixelRatio);
@@ -32,6 +32,8 @@ export default function Experience() {
       shadows={true}
       eventPrefix="client"
       onCreated={({ gl }) => gl.setClearColor(0x000000, 0)}
+      // camera={{ position: [1.5, 0, 0] }}
+      camera={{ position: [0, 0.5, 1.5] }}
     >
       <EffectComposer>
         <Bloom luminanceThreshold={0.9} luminanceSmoothing={0.9} height={300} />
@@ -40,14 +42,10 @@ export default function Experience() {
         <LensFlare opacity={0.5} />
       </EffectComposer>
       <DroneModel />
-      {/*<mesh>
-        <boxGeometry args={[2, 2, 2]} />
-        <meshPhongMaterial color="white" />
-      </mesh>*/}
 
-      <ambientLight intensity={0.5} />
+      <ambientLight intensity={1} />
       <directionalLight position={[5, 5, 5]} color="white" intensity={1.5} />
-      <OrbitControls />
+      {/*<OrbitControls />*/}
     </Canvas>
   );
 }

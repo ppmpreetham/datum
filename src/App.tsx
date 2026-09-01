@@ -1,11 +1,15 @@
 import "./App.css";
-import { RouterProvider } from "@tanstack/react-router";
-import { router } from "./main";
+import Stepper from "./components/ui/stepper";
+import Experience from "./Experience";
 
 export default function App() {
   return (
     <div className="h-screen min-h-screen w-screen">
-      <RouterProvider router={router} />
+      <Stepper
+        titles={["ESC Telemetry", "Gyroscope", "Accelerometer", "Magnetometer"]}
+        activeStep={1}
+      />
+      <Experience />
     </div>
   );
 }

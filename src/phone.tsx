@@ -1,7 +1,7 @@
 export interface GyroData {
-  alpha: number | null; // Yaw (0 to 360)
-  beta: number | null; // Pitch (-180 to 180)
-  gamma: number | null; // Roll (-90 to 90)
+  alpha: number | null;
+  beta: number | null;
+  gamma: number | null;
 }
 
 interface DeviceOrientationEventDeviceMotion {
@@ -66,7 +66,7 @@ export function GyroSender(): JSX.Element {
   };
 
   return (
-    <button onClick={handleButtonClick} type="button">
+    <button onClick={handleButtonClick} type="button" className="border border-black p-2">
       Start Sharing Gyroscope
     </button>
   );
