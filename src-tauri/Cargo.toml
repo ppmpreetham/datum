@@ -25,4 +25,5 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
-
+serialport = "4.7"
+mavlink = { version = "0.18", default-features = false, features = ["std", "transport-direct-serial", "serde", "mav2-message-extensions", "dialect-ardupilotmega", "dialect-common"] }
