@@ -13,6 +13,7 @@ use std::{
 
 const READ_TIMEOUT: Duration = Duration::from_millis(200);
 const AUTO_SCAN_TIMEOUT: Duration = Duration::from_millis(1800);
+const AUTO_RETRY_DELAY: Duration = Duration::from_secs(2);
 const DEFAULT_BAUD_RATE: u32 = 115_200;
 const DEFAULT_AUTO_BAUD_RATES: [u32; 5] = [115_200, 57_600, 921_600, 460_800, 230_400];
 const MAV_CMD_SET_MESSAGE_INTERVAL: u16 = 511;
@@ -44,12 +45,12 @@ fn run() -> Result<(), String> {
     let calibration = args.calibration;
     let gyro_requested = calibration.is_some_and(|(name, _)| name == "gyro");
 
+    start_phone_gyro_fallback_server();
+
     let (port_name, baud_rate, mut port) =
-        open_selected_port(args.port_selection, &args.baud_rates)?;
-    server::start();
+        open_or_wait_selected_port(args.port_selection, &args.baud_rates)?;
 
     println!("Connected to {port_name} at {baud_rate} baud.");
-    println!("WebSocket attitude stream available at ws://127.0.0.1:8000/ws/gyro.");
     if let Some((name, _)) = calibration {
         println!("Waiting for an ArduPilot or PX4 heartbeat before starting {name} calibration.");
     } else {
@@ -225,6 +226,13 @@ fn run() -> Result<(), String> {
     }
 }
 
+fn start_phone_gyro_fallback_server() {
+    server::start();
+    println!("WebSocket attitude stream available at ws://127.0.0.1:8000/ws/gyro.");
+    println!("Phone gyro fallback is active while the drone is disconnected.");
+    println!("Open the app's /sender page on a phone and tap Start Sharing Gyroscope.");
+}
+
 fn parse_args(arguments: impl IntoIterator<Item = String>) -> Result<MonitorArgs, String> {
     let mut arguments = arguments.into_iter();
     let first = arguments.next().ok_or_else(usage)?;
@@ -282,7 +290,7 @@ fn parse_baud_rates(value: &str) -> Option<Vec<u32>> {
     Some(baud_rates)
 }
 
-fn open_selected_port(
+fn open_or_wait_selected_port(
     port_selection: PortSelection,
     baud_rates: &[u32],
 ) -> Result<(String, u32, Box<dyn serialport::SerialPort>), String> {
@@ -292,7 +300,28 @@ fn open_selected_port(
             let port = open_serial_port(&port_name, baud_rate)?;
             Ok((port_name, baud_rate, port))
         }
-        PortSelection::Auto => auto_open_port(baud_rates),
+        PortSelection::Auto => wait_for_auto_port(baud_rates),
+    }
+}
+
+fn wait_for_auto_port(
+    baud_rates: &[u32],
+) -> Result<(String, u32, Box<dyn serialport::SerialPort>), String> {
+    println!("Waiting for an ArduPilot or PX4 serial port. Press Ctrl+C to stop.");
+
+    let mut scan_count = 0_u64;
+    loop {
+        scan_count += 1;
+        match auto_open_port(baud_rates) {
+            Ok(connection) => return Ok(connection),
+            Err(error) => {
+                println!("DRONE_CONNECTION connected=false scan={scan_count} reason=\"{error}\"");
+                println!(
+                    "No flight controller found yet. Plug in the drone and keep this running."
+                );
+                std::thread::sleep(AUTO_RETRY_DELAY);
+            }
+        }
     }
 }
 
@@ -309,17 +338,15 @@ fn open_serial_port(
 fn auto_open_port(
     baud_rates: &[u32],
 ) -> Result<(String, u32, Box<dyn serialport::SerialPort>), String> {
-    let mut ports = serialport::available_ports()
-        .map_err(|error| format!("could not list serial ports: {error}"))?;
-    ports.sort_by(|left, right| left.port_name.cmp(&right.port_name));
+    let port_names = auto_port_candidates()?;
 
-    if ports.is_empty() {
+    if port_names.is_empty() {
         return Err("no serial ports were detected".to_string());
     }
 
     println!(
-        "Auto scanning {} serial port(s) at baud rate(s): {}",
-        ports.len(),
+        "Auto scanning {} serial port candidate(s) at baud rate(s): {}",
+        port_names.len(),
         baud_rates
             .iter()
             .map(u32::to_string)
@@ -328,20 +355,21 @@ fn auto_open_port(
     );
 
     let mut attempts = Vec::new();
-    for port_info in ports {
+    let print_open_failures = port_names.len() <= 32;
+    for port_name in port_names {
         for baud_rate in baud_rates {
-            let port_name = port_info.port_name.clone();
-            print!("Checking {port_name} at {baud_rate} baud... ");
-
             let mut port = match open_serial_port(&port_name, *baud_rate) {
                 Ok(port) => port,
                 Err(error) => {
-                    println!("open failed");
+                    if print_open_failures {
+                        println!("Checking {port_name} at {baud_rate} baud... open failed");
+                    }
                     attempts.push(format!("{port_name}@{baud_rate}: {error}"));
                     continue;
                 }
             };
 
+            print!("Checking {port_name} at {baud_rate} baud... ");
             match wait_for_supported_heartbeat(&mut *port) {
                 Ok(Some(heartbeat)) => {
                     println!("found {}", flight_stack_name(heartbeat.autopilot));
@@ -362,8 +390,46 @@ fn auto_open_port(
 
     Err(format!(
         "no ArduPilot or PX4 heartbeat found. Tried: {}",
-        attempts.join("; ")
+        attempt_summary(&attempts)
     ))
+}
+
+fn auto_port_candidates() -> Result<Vec<String>, String> {
+    let mut port_names = serialport::available_ports()
+        .map_err(|error| format!("could not list serial ports: {error}"))?
+        .into_iter()
+        .map(|port| port.port_name)
+        .collect::<Vec<_>>();
+
+    port_names.extend(platform_auto_port_fallbacks());
+    port_names.sort();
+    port_names.dedup();
+    Ok(port_names)
+}
+
+#[cfg(windows)]
+fn platform_auto_port_fallbacks() -> Vec<String> {
+    (1..=256).map(|number| format!("COM{number}")).collect()
+}
+
+#[cfg(not(windows))]
+fn platform_auto_port_fallbacks() -> Vec<String> {
+    Vec::new()
+}
+
+fn attempt_summary(attempts: &[String]) -> String {
+    const MAX_ATTEMPTS_TO_PRINT: usize = 20;
+
+    if attempts.len() <= MAX_ATTEMPTS_TO_PRINT {
+        return attempts.join("; ");
+    }
+
+    format!(
+        "{} attempt(s); first {}: {}",
+        attempts.len(),
+        MAX_ATTEMPTS_TO_PRINT,
+        attempts[..MAX_ATTEMPTS_TO_PRINT].join("; ")
+    )
 }
 
 fn wait_for_supported_heartbeat(
@@ -465,5 +531,5 @@ fn publish_attitude_to_websocket(attitude: Attitude) {
 }
 
 fn usage() -> String {
-    "usage: cargo run --bin mavlink_monitor -- /dev/ttyACM0 [baud] [accelerometer|gyro|compass|radio|level]".to_string()
+    "usage: cargo run --bin mavlink_monitor -- auto [baud|baud,baud] [status|accelerometer|gyro|compass|radio|level]\n       cargo run --bin mavlink_monitor -- <port> [baud] [status|accelerometer|gyro|compass|radio|level]".to_string()
 }
