@@ -1,0 +1,8 @@
+.git
+.codex
+node_modules
+dist
+src-tauri
+Dockerfile.frontend
+compose.yaml
+*.log

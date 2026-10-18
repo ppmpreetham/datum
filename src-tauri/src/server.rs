@@ -43,7 +43,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     let mut send_task = tokio::spawn(async move {
         while let Ok(msg) = rx.recv().await {
-            if sender.send(Message::Text(msg.into())).await.is_err() {
+            if sender.send(Message::Text(msg)).await.is_err() {
                 break;
             }
         }
@@ -51,7 +51,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
 
     let mut recv_task = tokio::spawn(async move {
         while let Some(Ok(Message::Text(text))) = receiver.next().await {
-            let _ = tx.send(text.into());
+            let _ = tx.send(text);
         }
     });
 

@@ -1,4 +1,4 @@
-const steps: Step[] = [
+const steps: { title: string }[] = [
   {
     title: "ESC Telemetry",
   },
