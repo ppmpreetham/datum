@@ -16,6 +16,7 @@ pub fn run() {
             calibration::vehicle_status,
             calibration::list_serial_ports,
             calibration::calibration_options,
+            calibration::frame_options,
             calibration::connect_vehicle,
             calibration::connect_serial_vehicle,
             calibration::disconnect_vehicle,

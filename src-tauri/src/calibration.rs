@@ -156,6 +156,165 @@ pub struct CalibrationOption {
     pub note: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrameTypeOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub parameter_value: u8,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrameClassOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub parameter_value: u8,
+    pub types: Vec<FrameTypeOption>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrameOptionsResponse {
+    pub frame_classes: Vec<FrameClassOption>,
+    pub source: &'static str,
+    pub status: &'static str,
+}
+
+fn frame_type(
+    id: &'static str,
+    label: &'static str,
+    description: &'static str,
+    parameter_value: u8,
+) -> FrameTypeOption {
+    FrameTypeOption {
+        id,
+        label,
+        description,
+        parameter_value,
+    }
+}
+
+fn ardupilot_frame_options() -> FrameOptionsResponse {
+    let common = || {
+        vec![
+            frame_type("plus", "Plus", "One motor points forward.", 0),
+            frame_type("x", "X", "Two motors straddle the forward direction.", 1),
+            frame_type("v", "V", "V-shaped motor layout.", 2),
+            frame_type("h", "H", "H-shaped motor layout.", 3),
+        ]
+    };
+    FrameOptionsResponse {
+        frame_classes: vec![
+            FrameClassOption {
+                id: "quad",
+                label: "Quadcopter",
+                description: "Four-motor multicopter.",
+                parameter_value: 1,
+                types: vec![
+                    frame_type("plus", "Plus", "One motor points forward.", 0),
+                    frame_type("x", "X", "Two motors straddle the forward direction.", 1),
+                    frame_type("v", "V", "V-shaped quad layout.", 2),
+                    frame_type("h", "H", "H-shaped quad layout.", 3),
+                    frame_type("v_tail", "V-Tail", "Quad with a V-tail motor layout.", 4),
+                    frame_type("a_tail", "A-Tail", "Quad with an A-tail motor layout.", 5),
+                    frame_type(
+                        "betaflight_x",
+                        "BetaFlight X",
+                        "X geometry using BetaFlight motor ordering.",
+                        12,
+                    ),
+                    frame_type("dji_x", "DJI X", "X geometry using DJI motor ordering.", 13),
+                    frame_type(
+                        "clockwise_x",
+                        "Clockwise X",
+                        "X geometry using clockwise motor ordering.",
+                        14,
+                    ),
+                    frame_type(
+                        "betaflight_x_reversed",
+                        "BetaFlight X Reversed",
+                        "BetaFlight X ordering with reversed motor directions.",
+                        18,
+                    ),
+                    frame_type("y4", "Y4", "Four motors arranged in a Y layout.", 19),
+                ],
+            },
+            FrameClassOption {
+                id: "hexa",
+                label: "Hexacopter",
+                description: "Six-motor multicopter.",
+                parameter_value: 2,
+                types: common(),
+            },
+            FrameClassOption {
+                id: "octa",
+                label: "Octocopter",
+                description: "Eight-motor single-plane multicopter.",
+                parameter_value: 3,
+                types: vec![
+                    frame_type("plus", "Plus", "One motor points forward.", 0),
+                    frame_type("x", "X", "Two motors straddle the forward direction.", 1),
+                    frame_type("v", "V", "V-shaped motor layout.", 2),
+                    frame_type("h", "H", "H-shaped motor layout.", 3),
+                    frame_type("i", "I", "Sideways H octocopter layout.", 15),
+                ],
+            },
+            FrameClassOption {
+                id: "octa_quad",
+                label: "OctaQuad",
+                description: "Eight motors in four coaxial pairs.",
+                parameter_value: 4,
+                types: common(),
+            },
+            FrameClassOption {
+                id: "y6",
+                label: "Y6",
+                description: "Six motors in three coaxial pairs.",
+                parameter_value: 5,
+                types: vec![
+                    frame_type("y6b", "Y6B", "ArduPilot Y6B motor arrangement.", 10),
+                    frame_type("y6f", "Y6F", "FireFly Y6 motor arrangement.", 11),
+                ],
+            },
+            FrameClassOption {
+                id: "tri",
+                label: "Tricopter",
+                description: "Three-motor frame; FRAME_TYPE is ignored by ArduPilot.",
+                parameter_value: 7,
+                types: vec![],
+            },
+            FrameClassOption {
+                id: "dodeca_hexa",
+                label: "DodecaHexa",
+                description: "Twelve motors in six coaxial pairs.",
+                parameter_value: 12,
+                types: common(),
+            },
+            FrameClassOption {
+                id: "deca",
+                label: "Decacopter",
+                description: "Ten-motor multicopter.",
+                parameter_value: 14,
+                types: common(),
+            },
+        ],
+        source: "ardupilot_firmware_definition",
+        status: "available",
+    }
+}
+
+#[tauri::command]
+pub fn frame_options(
+    service: State<'_, CalibrationService>,
+) -> Result<FrameOptionsResponse, String> {
+    let session = service.0.lock().unwrap();
+    match session.status.firmware {
+        Some(Firmware::ArduPilot) => Ok(ardupilot_frame_options()),
+        Some(Firmware::Px4) => Err("UNSUPPORTED_FEATURE: PX4 airframes use SYS_AUTOSTART; ArduPilot FRAME_CLASS and FRAME_TYPE values cannot be applied.".into()),
+        None => Err("Connect a supported flight controller before requesting frame options.".into()),
+    }
+}
+
 #[tauri::command]
 pub fn calibration_options() -> Vec<CalibrationOption> {
     vec![
@@ -973,6 +1132,42 @@ mod tests {
         assert_eq!(json["usbVendorId"], 9900);
         assert_eq!(json["usbProductId"], 17);
         assert_eq!(json["product"], "Legacy FMU");
+    }
+
+    #[test]
+    fn ardupilot_frame_options_keep_firmware_values_distinct() {
+        let options = ardupilot_frame_options();
+        let quad = options
+            .frame_classes
+            .iter()
+            .find(|class| class.id == "quad")
+            .unwrap();
+        assert_eq!(quad.parameter_value, 1);
+        assert_eq!(
+            quad.types
+                .iter()
+                .find(|kind| kind.id == "x")
+                .unwrap()
+                .parameter_value,
+            1
+        );
+        assert_eq!(
+            quad.types
+                .iter()
+                .find(|kind| kind.id == "betaflight_x")
+                .unwrap()
+                .parameter_value,
+            12
+        );
+        assert!(!quad.types.iter().any(|kind| kind.id == "wide_x"));
+
+        let y6 = options
+            .frame_classes
+            .iter()
+            .find(|class| class.id == "y6")
+            .unwrap();
+        assert_eq!(y6.parameter_value, 5);
+        assert_eq!(y6.types.len(), 2);
     }
 
     #[test]
