@@ -33,6 +33,11 @@ pub fn run() {
             calibration::accept_compass_calibration,
             calibration::cancel_compass_calibration,
             calibration::retry_compass_calibration,
+            calibration::radio_channels,
+            calibration::start_radio_calibration,
+            calibration::radio_calibration_status,
+            calibration::finish_radio_calibration,
+            calibration::cancel_radio_calibration,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])

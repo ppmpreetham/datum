@@ -2,6 +2,7 @@ use mavlink::{ardupilotmega as mav, MavConnection, MavHeader};
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPortInfo, SerialPortType};
 use std::{
+    collections::BTreeMap,
     sync::{mpsc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -560,6 +561,11 @@ enum WorkerCommand {
         command: mav::MavCmd,
         mask: u8,
     },
+    RequestRadioStream,
+    SaveRadio {
+        parameters: BTreeMap<String, f32>,
+        reply: mpsc::Sender<Result<(), String>>,
+    },
     Continue,
     Stop,
     ReadFrame(mpsc::Sender<Result<FrameConfiguration, String>>),
@@ -583,6 +589,14 @@ struct PendingFrameWrite {
     reply: mpsc::Sender<Result<FrameUpdateResponse, String>>,
 }
 
+struct PendingParameterWrite {
+    expected: BTreeMap<String, f32>,
+    seen: BTreeMap<String, f32>,
+    verifying: bool,
+    started: Instant,
+    reply: mpsc::Sender<Result<(), String>>,
+}
+
 #[derive(Default)]
 struct Session {
     status: VehicleStatus,
@@ -596,10 +610,69 @@ struct Session {
     compass_retry_on_failure: bool,
     compass_autosave: bool,
     compass_sensors: Vec<CompassSensorStatus>,
+    radio_session_id: Option<String>,
+    radio_active: bool,
+    radio_capture_min_max: bool,
+    radio_capture_trim: bool,
+    radio_channels: Vec<RadioChannelStatus>,
 }
 
 #[derive(Default)]
 pub struct CalibrationService(Mutex<Session>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RadioChannelStatus {
+    pub channel: u8,
+    pub value_us: u16,
+    pub minimum_us: u16,
+    pub maximum_us: u16,
+    pub trim_us: u16,
+    pub range_valid: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RadioCalibrationStatus {
+    pub session_id: Option<String>,
+    pub status: String,
+    pub signal_available: bool,
+    pub channels: Vec<RadioChannelStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RadioStartRequest {
+    #[serde(default = "default_true")]
+    pub capture_min_max: bool,
+    #[serde(default = "default_true")]
+    pub capture_trim: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RadioSessionRequest {
+    pub session_id: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn radio_status(session: &Session) -> RadioCalibrationStatus {
+    RadioCalibrationStatus {
+        session_id: session.radio_session_id.clone(),
+        status: if session.radio_active {
+            "capturing".into()
+        } else if session.radio_session_id.is_some() {
+            "stopped".into()
+        } else {
+            "idle".into()
+        },
+        signal_available: !session.radio_channels.is_empty(),
+        channels: session.radio_channels.clone(),
+    }
+}
+
+fn radio_range_valid(minimum_us: u16, maximum_us: u16) -> bool {
+    maximum_us.saturating_sub(minimum_us) >= 400
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CompassSensorStatus {
@@ -772,7 +845,7 @@ fn change(
     generation: u64,
     f: impl FnOnce(&mut Session),
 ) {
-    let (snapshot, accelerometer, compass) = {
+    let (snapshot, accelerometer, compass, radio) = {
         let mut session = service.0.lock().unwrap();
         if session.generation != generation {
             return;
@@ -782,6 +855,7 @@ fn change(
             session.status.clone(),
             accelerometer_status(&session).ok(),
             compass_status(&session).ok(),
+            radio_status(&session),
         )
     };
     let _ = app.emit("datum://vehicle", snapshot);
@@ -791,6 +865,7 @@ fn change(
     if let Some(compass) = compass {
         let _ = app.emit("datum://compass", compass);
     }
+    let _ = app.emit("datum://radio", radio);
 }
 
 #[tauri::command]
@@ -1181,6 +1256,139 @@ pub fn retry_compass_calibration(
 }
 
 #[tauri::command]
+pub fn radio_channels(service: State<'_, CalibrationService>) -> RadioCalibrationStatus {
+    radio_status(&service.0.lock().unwrap())
+}
+
+#[tauri::command]
+pub fn start_radio_calibration(
+    request: RadioStartRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<RadioCalibrationStatus, String> {
+    if !request.capture_min_max && !request.capture_trim {
+        return Err("INVALID_REQUEST: enable range capture, trim capture, or both.".into());
+    }
+    let mut session = service.0.lock().unwrap();
+    if session.status.firmware != Some(Firmware::ArduPilot) {
+        return Err("UNSUPPORTED_FEATURE: this radio endpoint currently supports ArduPilot parameter calibration.".into());
+    }
+    if session.status.armed != Some(false) {
+        return Err("Disarm the vehicle before radio calibration.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::RequestRadioStream)
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    session.radio_session_id = Some(format!("radio-{}-{millis}", session.generation));
+    session.radio_active = true;
+    session.radio_capture_min_max = request.capture_min_max;
+    session.radio_capture_trim = request.capture_trim;
+    for channel in &mut session.radio_channels {
+        channel.minimum_us = channel.value_us;
+        channel.maximum_us = channel.value_us;
+        channel.trim_us = channel.value_us;
+        channel.range_valid = false;
+    }
+    Ok(radio_status(&session))
+}
+
+#[tauri::command]
+pub fn radio_calibration_status(service: State<'_, CalibrationService>) -> RadioCalibrationStatus {
+    radio_status(&service.0.lock().unwrap())
+}
+
+#[tauri::command]
+pub fn finish_radio_calibration(
+    request: RadioSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<RadioCalibrationStatus, String> {
+    let (receiver, capture_trim) = {
+        let session = service.0.lock().unwrap();
+        if session.radio_session_id.as_deref() != Some(request.session_id.as_str()) {
+            return Err("INVALID_SESSION: radio calibration session does not match.".into());
+        }
+        if !session.radio_active {
+            return Err("Radio calibration is not capturing.".into());
+        }
+        if session.radio_channels.is_empty() {
+            return Err("NO_RC_SIGNAL: no RC_CHANNELS telemetry has been received.".into());
+        }
+        if session.radio_capture_min_max {
+            let invalid = session
+                .radio_channels
+                .iter()
+                .filter(|channel| !radio_range_valid(channel.minimum_us, channel.maximum_us))
+                .map(|channel| channel.channel.to_string())
+                .collect::<Vec<_>>();
+            if !invalid.is_empty() {
+                return Err(format!(
+                    "INVALID_RC_RANGE: move channels {} through their complete range before finishing.",
+                    invalid.join(", ")
+                ));
+            }
+        }
+        let mut parameters = BTreeMap::new();
+        for channel in &session.radio_channels {
+            if session.radio_capture_min_max {
+                parameters.insert(
+                    format!("RC{}_MIN", channel.channel),
+                    channel.minimum_us as f32,
+                );
+                parameters.insert(
+                    format!("RC{}_MAX", channel.channel),
+                    channel.maximum_us as f32,
+                );
+            }
+            if session.radio_capture_trim {
+                parameters.insert(
+                    format!("RC{}_TRIM", channel.channel),
+                    channel.trim_us as f32,
+                );
+            }
+        }
+        let (reply, receiver) = mpsc::channel();
+        session
+            .sender
+            .as_ref()
+            .ok_or("Vehicle connection is unavailable.")?
+            .send(WorkerCommand::SaveRadio { parameters, reply })
+            .map_err(|_| "Vehicle connection was lost.".to_string())?;
+        (receiver, session.radio_capture_trim)
+    };
+    receiver
+        .recv_timeout(Duration::from_secs(15))
+        .map_err(|_| "Timed out saving and verifying radio parameters.".to_string())??;
+    let mut session = service.0.lock().unwrap();
+    session.radio_active = false;
+    let mut status = radio_status(&session);
+    status.status = if capture_trim {
+        "saved_and_verified".into()
+    } else {
+        "ranges_saved_and_verified".into()
+    };
+    Ok(status)
+}
+
+#[tauri::command]
+pub fn cancel_radio_calibration(
+    request: RadioSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<RadioCalibrationStatus, String> {
+    let mut session = service.0.lock().unwrap();
+    if session.radio_session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("INVALID_SESSION: radio calibration session does not match.".into());
+    }
+    session.radio_active = false;
+    Ok(radio_status(&session))
+}
+
+#[tauri::command]
 pub fn stop_calibration(service: State<'_, CalibrationService>) -> Result<(), String> {
     let session = service.0.lock().unwrap();
     match session.status.calibration.as_ref().map(|c| &c.phase) {
@@ -1251,6 +1459,7 @@ fn run_vehicle(
         Instant,
     )> = None;
     let mut pending_frame_write: Option<PendingFrameWrite> = None;
+    let mut pending_parameter_write: Option<PendingParameterWrite> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -1475,6 +1684,79 @@ fn run_vehicle(
                         .is_ok()
                     {
                         compass_action = Some(command);
+                    }
+                }
+                WorkerCommand::RequestRadioStream => {
+                    let status = service.0.lock().unwrap().status.clone();
+                    if let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let request = mav::COMMAND_LONG_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            command: mav::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                            confirmation: 0,
+                            param1: 65.0,
+                            param2: 100_000.0,
+                            param3: 0.0,
+                            param4: 0.0,
+                            param5: 0.0,
+                            param6: 0.0,
+                            param7: 0.0,
+                        };
+                        let _ = connection.send(&header, &mav::MavMessage::COMMAND_LONG(request));
+                    }
+                }
+                WorkerCommand::SaveRadio { parameters, reply } => {
+                    if pending_parameter_write.is_some() {
+                        let _ = reply.send(Err("A parameter save is already in progress.".into()));
+                        continue;
+                    }
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        let _ = reply.send(Err("Vehicle identity is unavailable.".into()));
+                        continue;
+                    };
+                    let mut error = None;
+                    for (name, value) in &parameters {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let set = mav::PARAM_SET_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            param_id: parameter_id(name).into(),
+                            param_value: *value,
+                            param_type: mav::MavParamType::MAV_PARAM_TYPE_REAL32,
+                        };
+                        if let Err(send_error) =
+                            connection.send(&header, &mav::MavMessage::PARAM_SET(set))
+                        {
+                            error = Some(format!("Could not write {name}: {send_error}"));
+                            break;
+                        }
+                    }
+                    if let Some(error) = error {
+                        let _ = reply.send(Err(error));
+                    } else {
+                        pending_parameter_write = Some(PendingParameterWrite {
+                            expected: parameters,
+                            seen: BTreeMap::new(),
+                            verifying: false,
+                            started: Instant::now(),
+                            reply,
+                        });
                     }
                 }
                 WorkerCommand::Continue => {
@@ -1800,6 +2082,69 @@ fn run_vehicle(
                 }
                 mav::MavMessage::PARAM_VALUE(parameter) => {
                     let parameter_name = parameter.param_id.to_str().unwrap_or_default();
+                    if let Some(mut write) = pending_parameter_write.take() {
+                        if write.expected.contains_key(parameter_name) {
+                            write
+                                .seen
+                                .insert(parameter_name.to_string(), parameter.param_value);
+                        }
+                        if write.seen.len() == write.expected.len() {
+                            let mismatch = write.expected.iter().find(|(name, expected)| {
+                                write
+                                    .seen
+                                    .get(*name)
+                                    .is_none_or(|actual| (*actual - **expected).abs() >= 0.5)
+                            });
+                            if let Some((name, expected)) = mismatch {
+                                let actual = write.seen.get(name).copied();
+                                let _ = write.reply.send(Err(format!(
+                                    "PARAMETER_VERIFICATION_FAILED: {name} expected {expected}, received {actual:?}."
+                                )));
+                            } else if write.verifying {
+                                let _ = write.reply.send(Ok(()));
+                            } else {
+                                let status = service.0.lock().unwrap().status.clone();
+                                if let (Some(system_id), Some(component_id)) =
+                                    (status.system_id, status.component_id)
+                                {
+                                    let mut error = None;
+                                    for name in write.expected.keys() {
+                                        sequence = sequence.wrapping_add(1);
+                                        let header = MavHeader {
+                                            system_id: 255,
+                                            component_id: 190,
+                                            sequence,
+                                        };
+                                        let request = mav::PARAM_REQUEST_READ_DATA {
+                                            target_system: system_id,
+                                            target_component: component_id,
+                                            param_id: parameter_id(name).into(),
+                                            param_index: -1,
+                                        };
+                                        if let Err(send_error) = connection.send(
+                                            &header,
+                                            &mav::MavMessage::PARAM_REQUEST_READ(request),
+                                        ) {
+                                            error = Some(format!(
+                                                "Could not read back {name}: {send_error}"
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                    if let Some(error) = error {
+                                        let _ = write.reply.send(Err(error));
+                                    } else {
+                                        write.seen.clear();
+                                        write.verifying = true;
+                                        write.started = Instant::now();
+                                        pending_parameter_write = Some(write);
+                                    }
+                                }
+                            }
+                        } else {
+                            pending_parameter_write = Some(write);
+                        }
+                    }
                     if let Some(mut write) = pending_frame_write.take() {
                         match parameter_name {
                             "FRAME_CLASS" => write.class_seen = Some(parameter.param_value),
@@ -1941,6 +2286,62 @@ fn run_vehicle(
                             });
                         }
                     }
+                }
+                mav::MavMessage::RC_CHANNELS(channels) => {
+                    let values = [
+                        channels.chan1_raw,
+                        channels.chan2_raw,
+                        channels.chan3_raw,
+                        channels.chan4_raw,
+                        channels.chan5_raw,
+                        channels.chan6_raw,
+                        channels.chan7_raw,
+                        channels.chan8_raw,
+                        channels.chan9_raw,
+                        channels.chan10_raw,
+                        channels.chan11_raw,
+                        channels.chan12_raw,
+                        channels.chan13_raw,
+                        channels.chan14_raw,
+                        channels.chan15_raw,
+                        channels.chan16_raw,
+                        channels.chan17_raw,
+                        channels.chan18_raw,
+                    ];
+                    change(&app, &service, generation, |s| {
+                        for (index, value) in values.into_iter().enumerate() {
+                            let channel_number = (index + 1) as u8;
+                            if channel_number > channels.chancount
+                                || value == 0
+                                || value == u16::MAX
+                            {
+                                continue;
+                            }
+                            if let Some(channel) = s
+                                .radio_channels
+                                .iter_mut()
+                                .find(|channel| channel.channel == channel_number)
+                            {
+                                channel.value_us = value;
+                                if s.radio_active && s.radio_capture_min_max {
+                                    channel.minimum_us = channel.minimum_us.min(value);
+                                    channel.maximum_us = channel.maximum_us.max(value);
+                                }
+                                channel.range_valid =
+                                    radio_range_valid(channel.minimum_us, channel.maximum_us);
+                            } else {
+                                s.radio_channels.push(RadioChannelStatus {
+                                    channel: channel_number,
+                                    value_us: value,
+                                    minimum_us: value,
+                                    maximum_us: value,
+                                    trim_us: value,
+                                    range_valid: false,
+                                });
+                            }
+                        }
+                        s.radio_channels.sort_by_key(|channel| channel.channel);
+                    });
                 }
                 mav::MavMessage::SYS_STATUS(status) => {
                     change(&app, &service, generation, |s| {
@@ -2146,6 +2547,28 @@ fn run_vehicle(
                 )));
             }
         }
+        if pending_parameter_write
+            .as_ref()
+            .is_some_and(|write| write.started.elapsed() > Duration::from_secs(10))
+        {
+            if let Some(write) = pending_parameter_write.take() {
+                let missing = write
+                    .expected
+                    .keys()
+                    .filter(|name| !write.seen.contains_key(*name))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = write.reply.send(Err(format!(
+                    "Timed out waiting for radio parameter {}: {missing}",
+                    if write.verifying {
+                        "readback"
+                    } else {
+                        "write acknowledgement"
+                    }
+                )));
+            }
+        }
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -2172,6 +2595,14 @@ mod tests {
         assert_eq!(json["usbVendorId"], 9900);
         assert_eq!(json["usbProductId"], 17);
         assert_eq!(json["product"], "Legacy FMU");
+    }
+
+    #[test]
+    fn radio_ranges_require_meaningful_travel() {
+        assert!(radio_range_valid(1000, 2000));
+        assert!(radio_range_valid(1100, 1500));
+        assert!(!radio_range_valid(1300, 1699));
+        assert!(!radio_range_valid(1800, 1200));
     }
 
     #[test]
