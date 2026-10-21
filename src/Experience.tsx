@@ -2,6 +2,7 @@ import { Canvas } from "@react-three/fiber";
 import { Bloom, EffectComposer, LensFlare, Noise, Vignette } from "@react-three/postprocessing";
 import { useEffect, useState } from "react";
 import { DroneModel } from "./components/models/drone";
+import { Trail } from "@react-three/drei";
 
 const getDevicePixelRatio = () => {
   return Math.min(1, window.devicePixelRatio);
