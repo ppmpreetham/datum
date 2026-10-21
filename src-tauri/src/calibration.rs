@@ -616,6 +616,12 @@ enum WorkerCommand {
         parameters: BTreeMap<String, f32>,
         reply: mpsc::Sender<Result<(), String>>,
     },
+    MotorTest {
+        motor_number: u8,
+        throttle_percent: f32,
+        duration_seconds: f32,
+        reply: mpsc::Sender<Result<MotorTestResponse, String>>,
+    },
     Continue,
     Stop,
     ReadFrame(mpsc::Sender<Result<FrameConfiguration, String>>),
@@ -835,6 +841,23 @@ pub struct BatteryUpdate {
 #[derive(Clone, Debug, Deserialize)]
 pub struct BatteryVoltageCalibration {
     pub measured_voltage: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MotorTestRequest {
+    pub motor_number: u8,
+    pub throttle_percent: f32,
+    pub duration_seconds: f32,
+    pub propellers_removed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct MotorTestResponse {
+    pub accepted: bool,
+    pub motor_number: u8,
+    pub throttle_percent: f32,
+    pub duration_seconds: f32,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1845,6 +1868,47 @@ pub fn calibrate_battery_voltage(
 }
 
 #[tauri::command]
+pub fn run_motor_test(
+    request: MotorTestRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<MotorTestResponse, String> {
+    if !request.propellers_removed {
+        return Err("PROPELLERS_PRESENT: remove all propellers before motor testing.".into());
+    }
+    if !(1..=32).contains(&request.motor_number)
+        || !(1.0..=15.0).contains(&request.throttle_percent)
+        || !(0.1..=5.0).contains(&request.duration_seconds)
+    {
+        return Err("INVALID_MOTOR_TEST: motor 1-32, throttle 1-15%, and duration 0.1-5 seconds are allowed.".into());
+    }
+    let receiver = {
+        let session = service.0.lock().unwrap();
+        if session.status.firmware != Some(Firmware::ArduPilot) {
+            return Err("UNSUPPORTED_FEATURE: motor test currently requires ArduPilot.".into());
+        }
+        if session.status.armed != Some(false) {
+            return Err("VEHICLE_ARMED: disarm before motor testing.".into());
+        }
+        let (reply, receiver) = mpsc::channel();
+        session
+            .sender
+            .as_ref()
+            .ok_or("Vehicle connection is unavailable.")?
+            .send(WorkerCommand::MotorTest {
+                motor_number: request.motor_number,
+                throttle_percent: request.throttle_percent,
+                duration_seconds: request.duration_seconds,
+                reply,
+            })
+            .map_err(|_| "Vehicle connection was lost.".to_string())?;
+        receiver
+    };
+    receiver
+        .recv_timeout(Duration::from_secs(8))
+        .map_err(|_| "Timed out waiting for motor-test acknowledgement.".to_string())?
+}
+
+#[tauri::command]
 pub fn stop_calibration(service: State<'_, CalibrationService>) -> Result<(), String> {
     let session = service.0.lock().unwrap();
     match session.status.calibration.as_ref().map(|c| &c.phase) {
@@ -1917,6 +1981,13 @@ fn run_vehicle(
     let mut pending_frame_write: Option<PendingFrameWrite> = None;
     let mut pending_parameter_write: Option<PendingParameterWrite> = None;
     let mut pending_parameter_read: Option<PendingParameterRead> = None;
+    let mut pending_motor_test: Option<(
+        u8,
+        f32,
+        f32,
+        Instant,
+        mpsc::Sender<Result<MotorTestResponse, String>>,
+    )> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -2260,6 +2331,57 @@ fn run_vehicle(
                         });
                     }
                 }
+                WorkerCommand::MotorTest {
+                    motor_number,
+                    throttle_percent,
+                    duration_seconds,
+                    reply,
+                } => {
+                    if pending_motor_test.is_some() {
+                        let _ = reply.send(Err("A motor test request is already pending.".into()));
+                        continue;
+                    }
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        let _ = reply.send(Err("Vehicle identity is unavailable.".into()));
+                        continue;
+                    };
+                    sequence = sequence.wrapping_add(1);
+                    let header = MavHeader {
+                        system_id: 255,
+                        component_id: 190,
+                        sequence,
+                    };
+                    let command = mav::COMMAND_LONG_DATA {
+                        target_system: system_id,
+                        target_component: component_id,
+                        command: mav::MavCmd::MAV_CMD_DO_MOTOR_TEST,
+                        confirmation: 0,
+                        param1: motor_number as f32,
+                        param2: 0.0,
+                        param3: throttle_percent,
+                        param4: duration_seconds,
+                        param5: 0.0,
+                        param6: 0.0,
+                        param7: 0.0,
+                    };
+                    match connection.send(&header, &mav::MavMessage::COMMAND_LONG(command)) {
+                        Ok(_) => {
+                            pending_motor_test = Some((
+                                motor_number,
+                                throttle_percent,
+                                duration_seconds,
+                                Instant::now(),
+                                reply,
+                            ))
+                        }
+                        Err(error) => {
+                            let _ = reply.send(Err(format!("Could not send motor test: {error}")));
+                        }
+                    }
+                }
                 WorkerCommand::Continue => {
                     if let Some(position) = awaiting_position {
                         let status = service.0.lock().unwrap().status.clone();
@@ -2462,6 +2584,30 @@ fn run_vehicle(
                     });
                 }
                 mav::MavMessage::COMMAND_ACK(ack) => {
+                    if ack.command == mav::MavCmd::MAV_CMD_DO_MOTOR_TEST {
+                        if let Some((motor, throttle, duration, _, reply)) =
+                            pending_motor_test.take()
+                        {
+                            if ack.result == mav::MavResult::MAV_RESULT_ACCEPTED
+                                || ack.result == mav::MavResult::MAV_RESULT_IN_PROGRESS
+                            {
+                                let _ = reply.send(Ok(MotorTestResponse {
+                                    accepted: true,
+                                    motor_number: motor,
+                                    throttle_percent: throttle,
+                                    duration_seconds: duration,
+                                    message: "Flight controller accepted the bounded motor test"
+                                        .into(),
+                                }));
+                            } else {
+                                let _ = reply.send(Err(format!(
+                                    "Motor test rejected by flight controller: {:?}",
+                                    ack.result
+                                )));
+                            }
+                        }
+                        continue;
+                    }
                     if compass_action == Some(ack.command) {
                         let action = compass_action.take();
                         let accepted = ack.result == mav::MavResult::MAV_RESULT_ACCEPTED;
@@ -3103,6 +3249,16 @@ fn run_vehicle(
                 let _ = read
                     .reply
                     .send(Err(format!("Timed out reading parameters: {missing}")));
+            }
+        }
+        if pending_motor_test
+            .as_ref()
+            .is_some_and(|(_, _, _, started, _)| started.elapsed() > Duration::from_secs(6))
+        {
+            if let Some((_, _, _, _, reply)) = pending_motor_test.take() {
+                let _ = reply.send(Err(
+                    "Motor-test result is unknown because no COMMAND_ACK was received.".into(),
+                ));
             }
         }
         thread::sleep(Duration::from_millis(20));

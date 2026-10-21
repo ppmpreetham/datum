@@ -51,6 +51,7 @@ pub fn run() {
             calibration::battery_configuration,
             calibration::set_battery_configuration,
             calibration::calibrate_battery_voltage,
+            calibration::run_motor_test,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])
