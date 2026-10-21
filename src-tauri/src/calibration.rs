@@ -4,7 +4,7 @@ use serialport::{SerialPortInfo, SerialPortType};
 use std::{
     sync::{mpsc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -77,6 +77,18 @@ fn position_prompt(position: f32) -> Option<(&'static str, u8)> {
         4 => Some(("Place the drone nose down, then press Continue", 50)),
         5 => Some(("Place the drone nose up, then press Continue", 67)),
         6 => Some(("Place the drone upside down, then press Continue", 84)),
+        _ => None,
+    }
+}
+
+fn position_name(position: f32) -> Option<&'static str> {
+    match position as u32 {
+        1 => Some("level"),
+        2 => Some("left"),
+        3 => Some("right"),
+        4 => Some("nose_down"),
+        5 => Some("nose_up"),
+        6 => Some("upside_down"),
         _ => None,
     }
 }
@@ -567,10 +579,60 @@ struct Session {
     status: VehicleStatus,
     sender: Option<mpsc::Sender<WorkerCommand>>,
     generation: u64,
+    accelerometer_session_id: Option<String>,
+    accelerometer_requested_position: Option<String>,
+    accelerometer_completed_steps: u8,
 }
 
 #[derive(Default)]
 pub struct CalibrationService(Mutex<Session>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct AccelerometerCalibrationStatus {
+    pub session_id: String,
+    pub status: CalibrationPhase,
+    pub current_step: u8,
+    pub total_steps: u8,
+    pub orientation: Option<String>,
+    pub instruction: String,
+    pub waiting_for_confirmation: bool,
+    pub percent: Option<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AccelerometerStepRequest {
+    pub session_id: String,
+    pub step: String,
+    pub action: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AccelerometerSessionRequest {
+    pub session_id: String,
+}
+
+fn accelerometer_status(session: &Session) -> Result<AccelerometerCalibrationStatus, String> {
+    let session_id = session
+        .accelerometer_session_id
+        .clone()
+        .ok_or("No accelerometer calibration session exists.")?;
+    let progress = session
+        .status
+        .calibration
+        .as_ref()
+        .filter(|progress| progress.kind == CalibrationKind::Accelerometer)
+        .ok_or("No accelerometer calibration session exists.")?;
+    Ok(AccelerometerCalibrationStatus {
+        session_id,
+        status: progress.phase.clone(),
+        current_step: (session.accelerometer_completed_steps + 1).min(6),
+        total_steps: 6,
+        orientation: session.accelerometer_requested_position.clone(),
+        instruction: progress.message.clone(),
+        waiting_for_confirmation: matches!(progress.phase, CalibrationPhase::AwaitingUser),
+        percent: progress.percent,
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -643,15 +705,18 @@ fn change(
     generation: u64,
     f: impl FnOnce(&mut Session),
 ) {
-    let snapshot = {
+    let (snapshot, accelerometer) = {
         let mut session = service.0.lock().unwrap();
         if session.generation != generation {
             return;
         }
         f(&mut session);
-        session.status.clone()
+        (session.status.clone(), accelerometer_status(&session).ok())
     };
     let _ = app.emit("datum://vehicle", snapshot);
+    if let Some(accelerometer) = accelerometer {
+        let _ = app.emit("datum://accelerometer", accelerometer);
+    }
 }
 
 #[tauri::command]
@@ -726,6 +791,13 @@ pub fn start_calibration(
     kind: CalibrationKind,
     service: State<'_, CalibrationService>,
 ) -> Result<(), String> {
+    start_calibration_inner(kind, &service)
+}
+
+fn start_calibration_inner(
+    kind: CalibrationKind,
+    service: &CalibrationService,
+) -> Result<(), String> {
     let mut session = service.0.lock().unwrap();
     let firmware = session
         .status
@@ -764,6 +836,96 @@ pub fn start_calibration(
         message: "Preparing calibration request".into(),
     });
     Ok(())
+}
+
+#[tauri::command]
+pub fn start_accelerometer_calibration(
+    calibration_type: Option<String>,
+    service: State<'_, CalibrationService>,
+) -> Result<AccelerometerCalibrationStatus, String> {
+    if calibration_type
+        .as_deref()
+        .is_some_and(|kind| kind != "full")
+    {
+        return Err(
+            "INVALID_CALIBRATION_TYPE: only full six-position calibration is supported.".into(),
+        );
+    }
+    start_calibration_inner(CalibrationKind::Accelerometer, &service)?;
+    let mut session = service.0.lock().unwrap();
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    session.accelerometer_session_id = Some(format!("accel-{}-{millis}", session.generation));
+    session.accelerometer_requested_position = None;
+    session.accelerometer_completed_steps = 0;
+    accelerometer_status(&session)
+}
+
+#[tauri::command]
+pub fn accelerometer_calibration_status(
+    service: State<'_, CalibrationService>,
+) -> Result<AccelerometerCalibrationStatus, String> {
+    accelerometer_status(&service.0.lock().unwrap())
+}
+
+#[tauri::command]
+pub fn accelerometer_calibration_step(
+    request: AccelerometerStepRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<AccelerometerCalibrationStatus, String> {
+    let mut session = service.0.lock().unwrap();
+    if session.accelerometer_session_id.as_deref() != Some(&request.session_id) {
+        return Err("INVALID_SESSION: accelerometer calibration session does not match.".into());
+    }
+    if request.action != "confirm_position" {
+        return Err("INVALID_ACTION: expected confirm_position.".into());
+    }
+    if session.accelerometer_requested_position.as_deref() != Some(&request.step) {
+        return Err(format!(
+            "POSITION_MISMATCH: the flight controller requested {}.",
+            session
+                .accelerometer_requested_position
+                .as_deref()
+                .unwrap_or("no position yet")
+        ));
+    }
+    if !matches!(
+        session.status.calibration.as_ref().map(|item| &item.phase),
+        Some(CalibrationPhase::AwaitingUser)
+    ) {
+        return Err("The flight controller is not waiting for position confirmation.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::Continue)
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    if let Some(progress) = &mut session.status.calibration {
+        progress.phase = CalibrationPhase::InProgress;
+        progress.message = "Position confirmation sent; waiting for controller feedback".into();
+    }
+    accelerometer_status(&session)
+}
+
+#[tauri::command]
+pub fn cancel_accelerometer_calibration(
+    request: AccelerometerSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<AccelerometerCalibrationStatus, String> {
+    let session = service.0.lock().unwrap();
+    if session.accelerometer_session_id.as_deref() != Some(&request.session_id) {
+        return Err("INVALID_SESSION: accelerometer calibration session does not match.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::Stop)
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    accelerometer_status(&session)
 }
 
 #[tauri::command]
@@ -989,6 +1151,9 @@ fn run_vehicle(
                             {
                                 awaiting_position = None;
                                 change(&app, &service, generation, |s| {
+                                    s.accelerometer_completed_steps =
+                                        (s.accelerometer_completed_steps + 1).min(6);
+                                    s.accelerometer_requested_position = None;
                                     if let Some(progress) = &mut s.status.calibration {
                                         progress.phase = CalibrationPhase::InProgress;
                                         progress.message =
@@ -1356,6 +1521,8 @@ fn run_vehicle(
                                 *last_activity = Instant::now();
                             }
                             change(&app, &service, generation, |s| {
+                                s.accelerometer_requested_position =
+                                    position_name(request.param1).map(str::to_string);
                                 s.status.calibration = Some(CalibrationProgress {
                                     kind: CalibrationKind::Accelerometer,
                                     phase: CalibrationPhase::AwaitingUser,
@@ -1366,6 +1533,8 @@ fn run_vehicle(
                         } else if request.param1 as u32 == 16777215 {
                             pending = None;
                             change(&app, &service, generation, |s| {
+                                s.accelerometer_completed_steps = 6;
+                                s.accelerometer_requested_position = None;
                                 s.status.calibration = Some(CalibrationProgress {
                                 kind: CalibrationKind::Accelerometer, phase: CalibrationPhase::Completed,
                                 percent: Some(100), message: "Accelerometer calibration completed according to the flight controller".into(),
@@ -1374,6 +1543,7 @@ fn run_vehicle(
                         } else if request.param1 as u32 == 16777216 {
                             pending = None;
                             change(&app, &service, generation, |s| {
+                                s.accelerometer_requested_position = None;
                                 s.status.calibration = Some(CalibrationProgress {
                                     kind: CalibrationKind::Accelerometer,
                                     phase: CalibrationPhase::Failed,
@@ -1695,5 +1865,8 @@ mod tests {
             Some(("Place the drone nose down, then press Continue", 50))
         );
         assert_eq!(position_prompt(9.0), None);
+        assert_eq!(position_name(1.0), Some("level"));
+        assert_eq!(position_name(6.0), Some("upside_down"));
+        assert_eq!(position_name(9.0), None);
     }
 }

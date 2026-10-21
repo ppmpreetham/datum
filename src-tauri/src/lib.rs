@@ -23,6 +23,10 @@ pub fn run() {
             calibration::connect_serial_vehicle,
             calibration::disconnect_vehicle,
             calibration::start_calibration,
+            calibration::start_accelerometer_calibration,
+            calibration::accelerometer_calibration_step,
+            calibration::accelerometer_calibration_status,
+            calibration::cancel_accelerometer_calibration,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])
