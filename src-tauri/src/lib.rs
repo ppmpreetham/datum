@@ -38,6 +38,12 @@ pub fn run() {
             calibration::radio_calibration_status,
             calibration::finish_radio_calibration,
             calibration::cancel_radio_calibration,
+            calibration::esc_capabilities,
+            calibration::esc_steps,
+            calibration::start_esc_calibration,
+            calibration::advance_esc_calibration,
+            calibration::esc_calibration_status,
+            calibration::cancel_esc_calibration,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])

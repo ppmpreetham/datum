@@ -496,6 +496,52 @@ fn parameter_id(name: &str) -> [u8; 16] {
     result
 }
 
+fn read_parameters(
+    service: &CalibrationService,
+    names: &[&str],
+) -> Result<BTreeMap<String, f32>, String> {
+    let receiver = {
+        let session = service.0.lock().unwrap();
+        let (reply, receiver) = mpsc::channel();
+        session
+            .sender
+            .as_ref()
+            .ok_or("Vehicle connection is unavailable.")?
+            .send(WorkerCommand::ReadParameters {
+                names: names.iter().map(|name| (*name).to_string()).collect(),
+                reply,
+            })
+            .map_err(|_| "Vehicle connection was lost.".to_string())?;
+        receiver
+    };
+    receiver
+        .recv_timeout(Duration::from_secs(8))
+        .map_err(|_| "Timed out waiting for flight-controller parameters.".to_string())?
+}
+
+fn write_parameters(
+    service: &CalibrationService,
+    parameters: BTreeMap<String, f32>,
+) -> Result<(), String> {
+    let receiver = {
+        let session = service.0.lock().unwrap();
+        if session.status.armed != Some(false) {
+            return Err("Disarm the vehicle before changing configuration parameters.".into());
+        }
+        let (reply, receiver) = mpsc::channel();
+        session
+            .sender
+            .as_ref()
+            .ok_or("Vehicle connection is unavailable.")?
+            .send(WorkerCommand::WriteParameters { parameters, reply })
+            .map_err(|_| "Vehicle connection was lost.".to_string())?;
+        receiver
+    };
+    receiver
+        .recv_timeout(Duration::from_secs(15))
+        .map_err(|_| "Timed out writing flight-controller parameters.".to_string())?
+}
+
 #[tauri::command]
 pub fn calibration_options() -> Vec<CalibrationOption> {
     vec![
@@ -562,7 +608,11 @@ enum WorkerCommand {
         mask: u8,
     },
     RequestRadioStream,
-    SaveRadio {
+    ReadParameters {
+        names: Vec<String>,
+        reply: mpsc::Sender<Result<BTreeMap<String, f32>, String>>,
+    },
+    WriteParameters {
         parameters: BTreeMap<String, f32>,
         reply: mpsc::Sender<Result<(), String>>,
     },
@@ -597,6 +647,13 @@ struct PendingParameterWrite {
     reply: mpsc::Sender<Result<(), String>>,
 }
 
+struct PendingParameterRead {
+    names: Vec<String>,
+    values: BTreeMap<String, f32>,
+    started: Instant,
+    reply: mpsc::Sender<Result<BTreeMap<String, f32>, String>>,
+}
+
 #[derive(Default)]
 struct Session {
     status: VehicleStatus,
@@ -615,6 +672,9 @@ struct Session {
     radio_capture_min_max: bool,
     radio_capture_trim: bool,
     radio_channels: Vec<RadioChannelStatus>,
+    esc_session_id: Option<String>,
+    esc_step: usize,
+    esc_active: bool,
 }
 
 #[derive(Default)]
@@ -672,6 +732,56 @@ fn radio_status(session: &Session) -> RadioCalibrationStatus {
 
 fn radio_range_valid(minimum_us: u16, maximum_us: u16) -> bool {
     maximum_us.saturating_sub(minimum_us) >= 400
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EscCapabilities {
+    pub pwm_type_value: u8,
+    pub protocol: String,
+    pub endpoint_calibration_required: bool,
+    pub software_can_verify_completion: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EscWorkflowStatus {
+    pub session_id: String,
+    pub active: bool,
+    pub step_id: String,
+    pub instruction: String,
+    pub manually_confirmed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct EscStartRequest {
+    pub propellers_removed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct EscStepRequest {
+    pub session_id: String,
+    pub step_id: String,
+    pub action: String,
+}
+
+const ESC_STEPS: [(&str, &str); 5] = [
+    ("remove_propellers", "Remove every propeller and secure the vehicle."),
+    ("disconnect_battery", "Disconnect flight battery power; keep USB connected only if your controller procedure permits it."),
+    ("raise_throttle", "Move transmitter throttle to maximum."),
+    ("power_and_confirm_tones", "Follow the ESC manufacturer's power-up procedure and confirm the calibration tones."),
+    ("lower_throttle", "Move throttle to minimum and confirm the completion tones, then disconnect power."),
+];
+
+fn esc_protocol(value: u8) -> (&'static str, bool) {
+    match value {
+        4 => ("dshot150", false),
+        5 => ("dshot300", false),
+        6 => ("dshot600", false),
+        7 => ("dshot1200", false),
+        1 => ("oneshot", true),
+        2 => ("oneshot125", true),
+        3 => ("brushed", false),
+        _ => ("normal_pwm", true),
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1357,7 +1467,7 @@ pub fn finish_radio_calibration(
             .sender
             .as_ref()
             .ok_or("Vehicle connection is unavailable.")?
-            .send(WorkerCommand::SaveRadio { parameters, reply })
+            .send(WorkerCommand::WriteParameters { parameters, reply })
             .map_err(|_| "Vehicle connection was lost.".to_string())?;
         (receiver, session.radio_capture_trim)
     };
@@ -1386,6 +1496,115 @@ pub fn cancel_radio_calibration(
     }
     session.radio_active = false;
     Ok(radio_status(&session))
+}
+
+#[tauri::command]
+pub fn esc_capabilities(service: State<'_, CalibrationService>) -> Result<EscCapabilities, String> {
+    let values = read_parameters(&service, &["MOT_PWM_TYPE"])?;
+    let value = values["MOT_PWM_TYPE"].round() as u8;
+    let (protocol, required) = esc_protocol(value);
+    Ok(EscCapabilities {
+        pwm_type_value: value,
+        protocol: protocol.into(),
+        endpoint_calibration_required: required,
+        software_can_verify_completion: false,
+    })
+}
+
+#[tauri::command]
+pub fn esc_steps() -> Vec<BTreeMap<String, String>> {
+    ESC_STEPS
+        .iter()
+        .map(|(id, instruction)| {
+            BTreeMap::from([
+                ("step_id".into(), (*id).into()),
+                ("instruction".into(), (*instruction).into()),
+            ])
+        })
+        .collect()
+}
+
+fn esc_status(session: &Session) -> Result<EscWorkflowStatus, String> {
+    let session_id = session
+        .esc_session_id
+        .clone()
+        .ok_or("No ESC calibration workflow exists.")?;
+    let index = session.esc_step.min(ESC_STEPS.len() - 1);
+    Ok(EscWorkflowStatus {
+        session_id,
+        active: session.esc_active,
+        step_id: ESC_STEPS[index].0.into(),
+        instruction: ESC_STEPS[index].1.into(),
+        manually_confirmed: !session.esc_active && session.esc_step >= ESC_STEPS.len(),
+    })
+}
+
+#[tauri::command]
+pub fn start_esc_calibration(
+    request: EscStartRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<EscWorkflowStatus, String> {
+    if !request.propellers_removed {
+        return Err("PROPELLERS_PRESENT: remove all propellers before ESC calibration.".into());
+    }
+    let capability = esc_capabilities(service.clone())?;
+    if !capability.endpoint_calibration_required {
+        return Err(format!(
+            "UNSUPPORTED_FEATURE: {} does not require traditional PWM endpoint calibration.",
+            capability.protocol
+        ));
+    }
+    let mut session = service.0.lock().unwrap();
+    if session.status.armed != Some(false) {
+        return Err("Disarm the vehicle before ESC calibration.".into());
+    }
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    session.esc_session_id = Some(format!("esc-{}-{millis}", session.generation));
+    session.esc_step = 0;
+    session.esc_active = true;
+    esc_status(&session)
+}
+
+#[tauri::command]
+pub fn advance_esc_calibration(
+    request: EscStepRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<EscWorkflowStatus, String> {
+    let mut session = service.0.lock().unwrap();
+    if session.esc_session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("INVALID_SESSION: ESC workflow session does not match.".into());
+    }
+    if request.action != "confirm_completed" || ESC_STEPS[session.esc_step].0 != request.step_id {
+        return Err("INVALID_STEP: confirm the currently requested ESC workflow step.".into());
+    }
+    session.esc_step += 1;
+    if session.esc_step >= ESC_STEPS.len() {
+        session.esc_active = false;
+    }
+    esc_status(&session)
+}
+
+#[tauri::command]
+pub fn esc_calibration_status(
+    service: State<'_, CalibrationService>,
+) -> Result<EscWorkflowStatus, String> {
+    esc_status(&service.0.lock().unwrap())
+}
+
+#[tauri::command]
+pub fn cancel_esc_calibration(
+    request: RadioSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<EscWorkflowStatus, String> {
+    let mut session = service.0.lock().unwrap();
+    if session.esc_session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("INVALID_SESSION: ESC workflow session does not match.".into());
+    }
+    session.esc_active = false;
+    esc_status(&session)
 }
 
 #[tauri::command]
@@ -1460,6 +1679,7 @@ fn run_vehicle(
     )> = None;
     let mut pending_frame_write: Option<PendingFrameWrite> = None;
     let mut pending_parameter_write: Option<PendingParameterWrite> = None;
+    let mut pending_parameter_read: Option<PendingParameterRead> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -1713,7 +1933,51 @@ fn run_vehicle(
                         let _ = connection.send(&header, &mav::MavMessage::COMMAND_LONG(request));
                     }
                 }
-                WorkerCommand::SaveRadio { parameters, reply } => {
+                WorkerCommand::ReadParameters { names, reply } => {
+                    if pending_parameter_read.is_some() {
+                        let _ = reply.send(Err("A parameter read is already in progress.".into()));
+                        continue;
+                    }
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        let _ = reply.send(Err("Vehicle identity is unavailable.".into()));
+                        continue;
+                    };
+                    let mut error = None;
+                    for name in &names {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let request = mav::PARAM_REQUEST_READ_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            param_id: parameter_id(name).into(),
+                            param_index: -1,
+                        };
+                        if let Err(send_error) =
+                            connection.send(&header, &mav::MavMessage::PARAM_REQUEST_READ(request))
+                        {
+                            error = Some(format!("Could not request {name}: {send_error}"));
+                            break;
+                        }
+                    }
+                    if let Some(error) = error {
+                        let _ = reply.send(Err(error));
+                    } else {
+                        pending_parameter_read = Some(PendingParameterRead {
+                            names,
+                            values: BTreeMap::new(),
+                            started: Instant::now(),
+                            reply,
+                        });
+                    }
+                }
+                WorkerCommand::WriteParameters { parameters, reply } => {
                     if pending_parameter_write.is_some() {
                         let _ = reply.send(Err("A parameter save is already in progress.".into()));
                         continue;
@@ -2082,6 +2346,17 @@ fn run_vehicle(
                 }
                 mav::MavMessage::PARAM_VALUE(parameter) => {
                     let parameter_name = parameter.param_id.to_str().unwrap_or_default();
+                    if let Some(mut read) = pending_parameter_read.take() {
+                        if read.names.iter().any(|name| name == parameter_name) {
+                            read.values
+                                .insert(parameter_name.to_string(), parameter.param_value);
+                        }
+                        if read.values.len() == read.names.len() {
+                            let _ = read.reply.send(Ok(read.values));
+                        } else {
+                            pending_parameter_read = Some(read);
+                        }
+                    }
                     if let Some(mut write) = pending_parameter_write.take() {
                         if write.expected.contains_key(parameter_name) {
                             write
@@ -2567,6 +2842,23 @@ fn run_vehicle(
                         "write acknowledgement"
                     }
                 )));
+            }
+        }
+        if pending_parameter_read
+            .as_ref()
+            .is_some_and(|read| read.started.elapsed() > Duration::from_secs(6))
+        {
+            if let Some(read) = pending_parameter_read.take() {
+                let missing = read
+                    .names
+                    .iter()
+                    .filter(|name| !read.values.contains_key(*name))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = read
+                    .reply
+                    .send(Err(format!("Timed out reading parameters: {missing}")));
             }
         }
         thread::sleep(Duration::from_millis(20));
