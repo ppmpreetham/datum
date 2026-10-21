@@ -62,6 +62,41 @@ controller and returns only after both actual `PARAM_VALUE` messages arrive.
 An unknown value is preserved in its numeric field and has a `null` name. A
 read times out after five seconds if either parameter is not returned.
 
+## Set and verify the frame
+
+Command: `set_frame`
+
+Arguments:
+
+```json
+{
+  "selection": {
+    "frame_class": "quad",
+    "frame_type": "x"
+  }
+}
+```
+
+The vehicle must be connected, identified as ArduPilot, and disarmed. The
+backend rejects unknown frame classes and invalid class/type combinations.
+It sends `PARAM_SET` for `FRAME_CLASS` and `FRAME_TYPE`, waits for both
+parameter echoes, requests both parameters again, and compares the readback.
+It reports success only after the readback matches.
+
+```json
+{
+  "success": true,
+  "verified": true,
+  "frame_class": "quad",
+  "frame_type": "x",
+  "reboot_required": true
+}
+```
+
+For a class whose firmware ignores `FRAME_TYPE`, such as `tri`, omit
+`frame_type`. Any successful change requires a flight-controller reboot before
+flight. Frame selection does not change physical motor wiring.
+
 ArduPilot does not define a separate `FRAME_TYPE` value for a generic physical
 "Wide X" geometry. Datum therefore does not claim that such an option exists;
 the correct mixer must be selected from the firmware-defined layouts.

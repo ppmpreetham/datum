@@ -18,6 +18,7 @@ pub fn run() {
             calibration::calibration_options,
             calibration::frame_options,
             calibration::current_frame,
+            calibration::set_frame,
             calibration::connect_vehicle,
             calibration::connect_serial_vehicle,
             calibration::disconnect_vehicle,

@@ -189,6 +189,21 @@ pub struct FrameConfiguration {
     pub reboot_required: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub struct FrameSelection {
+    pub frame_class: String,
+    pub frame_type: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrameUpdateResponse {
+    pub success: bool,
+    pub verified: bool,
+    pub frame_class: String,
+    pub frame_type: Option<String>,
+    pub reboot_required: bool,
+}
+
 fn frame_type(
     id: &'static str,
     label: &'static str,
@@ -332,6 +347,39 @@ fn resolve_frame_configuration(class_value: f32, type_value: f32) -> FrameConfig
     }
 }
 
+fn resolve_frame_selection(selection: &FrameSelection) -> Result<(u8, u8), String> {
+    let options = ardupilot_frame_options();
+    let class = options
+        .frame_classes
+        .iter()
+        .find(|item| item.id == selection.frame_class)
+        .ok_or_else(|| format!("INVALID_FRAME_CLASS: {}", selection.frame_class))?;
+    if class.types.is_empty() {
+        if selection.frame_type.is_some() {
+            return Err(format!(
+                "INVALID_FRAME_COMBINATION: {} ignores FRAME_TYPE; omit frame_type.",
+                selection.frame_class
+            ));
+        }
+        return Ok((class.parameter_value, 0));
+    }
+    let requested_type = selection
+        .frame_type
+        .as_deref()
+        .ok_or("INVALID_FRAME_TYPE: frame_type is required for this frame class.")?;
+    let frame_type = class
+        .types
+        .iter()
+        .find(|item| item.id == requested_type)
+        .ok_or_else(|| {
+            format!(
+                "INVALID_FRAME_COMBINATION: {requested_type} is not supported for {}.",
+                selection.frame_class
+            )
+        })?;
+    Ok((class.parameter_value, frame_type.parameter_value))
+}
+
 #[tauri::command]
 pub fn frame_options(
     service: State<'_, CalibrationService>,
@@ -373,6 +421,58 @@ pub fn current_frame(service: State<'_, CalibrationService>) -> Result<FrameConf
     receiver.recv_timeout(Duration::from_secs(6)).map_err(|_| {
         "Timed out reading FRAME_CLASS and FRAME_TYPE from the flight controller.".to_string()
     })?
+}
+
+#[tauri::command]
+pub fn set_frame(
+    selection: FrameSelection,
+    service: State<'_, CalibrationService>,
+) -> Result<FrameUpdateResponse, String> {
+    let (class_value, type_value) = resolve_frame_selection(&selection)?;
+    let receiver =
+        {
+            let session = service.0.lock().unwrap();
+            match session.status.firmware {
+                Some(Firmware::ArduPilot) => {}
+                Some(Firmware::Px4) => {
+                    return Err(
+                        "UNSUPPORTED_FEATURE: PX4 does not use FRAME_CLASS and FRAME_TYPE.".into(),
+                    )
+                }
+                None => return Err(
+                    "Connect an ArduPilot flight controller before changing frame configuration."
+                        .into(),
+                ),
+            }
+            match session.status.armed {
+                Some(false) => {}
+                Some(true) => return Err(
+                    "VEHICLE_ARMED: Disarm the vehicle before changing its frame configuration."
+                        .into(),
+                ),
+                None => {
+                    return Err(
+                        "Waiting for vehicle arm state. Try again after a heartbeat.".into(),
+                    )
+                }
+            }
+            let (reply, receiver) = mpsc::channel();
+            session
+                .sender
+                .as_ref()
+                .ok_or("Vehicle connection is unavailable.")?
+                .send(WorkerCommand::SetFrame {
+                    selection,
+                    class_value,
+                    type_value,
+                    reply,
+                })
+                .map_err(|_| "Vehicle connection was lost.".to_string())?;
+            receiver
+        };
+    receiver
+        .recv_timeout(Duration::from_secs(12))
+        .map_err(|_| "Timed out writing and verifying FRAME_CLASS and FRAME_TYPE.".to_string())?
 }
 
 fn parameter_id(name: &str) -> [u8; 16] {
@@ -442,7 +542,24 @@ enum WorkerCommand {
     Continue,
     Stop,
     ReadFrame(mpsc::Sender<Result<FrameConfiguration, String>>),
+    SetFrame {
+        selection: FrameSelection,
+        class_value: u8,
+        type_value: u8,
+        reply: mpsc::Sender<Result<FrameUpdateResponse, String>>,
+    },
     Disconnect,
+}
+
+struct PendingFrameWrite {
+    selection: FrameSelection,
+    class_value: f32,
+    type_value: f32,
+    class_seen: Option<f32>,
+    type_seen: Option<f32>,
+    verifying: bool,
+    started: Instant,
+    reply: mpsc::Sender<Result<FrameUpdateResponse, String>>,
 }
 
 #[derive(Default)]
@@ -718,6 +835,7 @@ fn run_vehicle(
         Option<f32>,
         Instant,
     )> = None;
+    let mut pending_frame_write: Option<PendingFrameWrite> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -741,8 +859,67 @@ fn run_vehicle(
         while let Ok(command) = commands.try_recv() {
             match command {
                 WorkerCommand::Disconnect => return,
+                WorkerCommand::SetFrame {
+                    selection,
+                    class_value,
+                    type_value,
+                    reply,
+                } => {
+                    if pending_frame_read.is_some() || pending_frame_write.is_some() {
+                        let _ = reply.send(Err(
+                            "Another frame parameter operation is already in progress.".into(),
+                        ));
+                        continue;
+                    }
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        let _ = reply.send(Err("Vehicle identity is not available yet.".into()));
+                        continue;
+                    };
+                    let mut send_error = None;
+                    for (name, value) in [
+                        ("FRAME_CLASS", class_value as f32),
+                        ("FRAME_TYPE", type_value as f32),
+                    ] {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let parameter = mav::PARAM_SET_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            param_id: parameter_id(name).into(),
+                            param_value: value,
+                            param_type: mav::MavParamType::MAV_PARAM_TYPE_REAL32,
+                        };
+                        if let Err(error) =
+                            connection.send(&header, &mav::MavMessage::PARAM_SET(parameter))
+                        {
+                            send_error = Some(format!("Could not write {name}: {error}"));
+                            break;
+                        }
+                    }
+                    if let Some(error) = send_error {
+                        let _ = reply.send(Err(error));
+                    } else {
+                        pending_frame_write = Some(PendingFrameWrite {
+                            selection,
+                            class_value: class_value as f32,
+                            type_value: type_value as f32,
+                            class_seen: None,
+                            type_seen: None,
+                            verifying: false,
+                            started: Instant::now(),
+                            reply,
+                        });
+                    }
+                }
                 WorkerCommand::ReadFrame(reply) => {
-                    if pending_frame_read.is_some() {
+                    if pending_frame_read.is_some() || pending_frame_write.is_some() {
                         let _ = reply
                             .send(Err("A frame parameter read is already in progress.".into()));
                         continue;
@@ -1071,8 +1248,82 @@ fn run_vehicle(
                     }
                 }
                 mav::MavMessage::PARAM_VALUE(parameter) => {
+                    let parameter_name = parameter.param_id.to_str().unwrap_or_default();
+                    if let Some(mut write) = pending_frame_write.take() {
+                        match parameter_name {
+                            "FRAME_CLASS" => write.class_seen = Some(parameter.param_value),
+                            "FRAME_TYPE" => write.type_seen = Some(parameter.param_value),
+                            _ => {}
+                        }
+                        if let (Some(class_value), Some(type_value)) =
+                            (write.class_seen, write.type_seen)
+                        {
+                            let values_match = (class_value - write.class_value).abs() < 0.01
+                                && (type_value - write.type_value).abs() < 0.01;
+                            if !values_match {
+                                let _ = write.reply.send(Err(format!(
+                                    "PARAMETER_VERIFICATION_FAILED: expected FRAME_CLASS={} and FRAME_TYPE={}, received {class_value} and {type_value}.",
+                                    write.class_value, write.type_value
+                                )));
+                            } else if write.verifying {
+                                let _ = write.reply.send(Ok(FrameUpdateResponse {
+                                    success: true,
+                                    verified: true,
+                                    frame_class: write.selection.frame_class,
+                                    frame_type: write.selection.frame_type,
+                                    reboot_required: true,
+                                }));
+                            } else {
+                                let status = service.0.lock().unwrap().status.clone();
+                                if let (Some(system_id), Some(component_id)) =
+                                    (status.system_id, status.component_id)
+                                {
+                                    let mut request_error = None;
+                                    for name in ["FRAME_CLASS", "FRAME_TYPE"] {
+                                        sequence = sequence.wrapping_add(1);
+                                        let request_header = MavHeader {
+                                            system_id: 255,
+                                            component_id: 190,
+                                            sequence,
+                                        };
+                                        let request = mav::PARAM_REQUEST_READ_DATA {
+                                            target_system: system_id,
+                                            target_component: component_id,
+                                            param_id: parameter_id(name).into(),
+                                            param_index: -1,
+                                        };
+                                        if let Err(error) = connection.send(
+                                            &request_header,
+                                            &mav::MavMessage::PARAM_REQUEST_READ(request),
+                                        ) {
+                                            request_error = Some(format!(
+                                                "Could not verify {name} after writing: {error}"
+                                            ));
+                                            break;
+                                        }
+                                    }
+                                    if let Some(error) = request_error {
+                                        let _ = write.reply.send(Err(error));
+                                    } else {
+                                        write.class_seen = None;
+                                        write.type_seen = None;
+                                        write.verifying = true;
+                                        write.started = Instant::now();
+                                        pending_frame_write = Some(write);
+                                    }
+                                } else {
+                                    let _ = write.reply.send(Err(
+                                        "Vehicle identity was lost before parameter verification."
+                                            .into(),
+                                    ));
+                                }
+                            }
+                        } else {
+                            pending_frame_write = Some(write);
+                        }
+                    }
                     if let Some((_, class_value, type_value, _)) = &mut pending_frame_read {
-                        match parameter.param_id.to_str().unwrap_or_default() {
+                        match parameter_name {
                             "FRAME_CLASS" => *class_value = Some(parameter.param_value),
                             "FRAME_TYPE" => *type_value = Some(parameter.param_value),
                             _ => {}
@@ -1257,6 +1508,21 @@ fn run_vehicle(
                 ));
             }
         }
+        if pending_frame_write
+            .as_ref()
+            .is_some_and(|write| write.started.elapsed() > Duration::from_secs(5))
+        {
+            if let Some(write) = pending_frame_write.take() {
+                let phase = if write.verifying {
+                    "readback verification"
+                } else {
+                    "parameter write acknowledgement"
+                };
+                let _ = write.reply.send(Err(format!(
+                    "Timed out waiting for frame {phase} from the flight controller."
+                )));
+            }
+        }
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1333,6 +1599,37 @@ mod tests {
         assert_eq!(unknown.frame_type, None);
         assert_eq!(unknown.frame_class_value, 99.0);
         assert_eq!(unknown.frame_type_value, 42.0);
+    }
+
+    #[test]
+    fn frame_selection_rejects_invalid_combinations() {
+        assert_eq!(
+            resolve_frame_selection(&FrameSelection {
+                frame_class: "quad".into(),
+                frame_type: Some("x".into()),
+            })
+            .unwrap(),
+            (1, 1)
+        );
+        assert!(resolve_frame_selection(&FrameSelection {
+            frame_class: "y6".into(),
+            frame_type: Some("x".into()),
+        })
+        .unwrap_err()
+        .starts_with("INVALID_FRAME_COMBINATION"));
+        assert!(resolve_frame_selection(&FrameSelection {
+            frame_class: "tri".into(),
+            frame_type: Some("x".into()),
+        })
+        .is_err());
+        assert_eq!(
+            resolve_frame_selection(&FrameSelection {
+                frame_class: "tri".into(),
+                frame_type: None,
+            })
+            .unwrap(),
+            (7, 0)
+        );
     }
 
     #[test]
