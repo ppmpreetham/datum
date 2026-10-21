@@ -27,6 +27,12 @@ pub fn run() {
             calibration::accelerometer_calibration_step,
             calibration::accelerometer_calibration_status,
             calibration::cancel_accelerometer_calibration,
+            calibration::compass_sensors,
+            calibration::start_compass_calibration,
+            calibration::compass_calibration_status,
+            calibration::accept_compass_calibration,
+            calibration::cancel_compass_calibration,
+            calibration::retry_compass_calibration,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])

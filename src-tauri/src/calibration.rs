@@ -551,6 +551,15 @@ impl Default for VehicleStatus {
 
 enum WorkerCommand {
     Start(CalibrationKind),
+    StartCompass {
+        mask: u8,
+        retry_on_failure: bool,
+        autosave: bool,
+    },
+    CompassAction {
+        command: mav::MavCmd,
+        mask: u8,
+    },
     Continue,
     Stop,
     ReadFrame(mpsc::Sender<Result<FrameConfiguration, String>>),
@@ -582,10 +591,68 @@ struct Session {
     accelerometer_session_id: Option<String>,
     accelerometer_requested_position: Option<String>,
     accelerometer_completed_steps: u8,
+    compass_session_id: Option<String>,
+    compass_mask: u8,
+    compass_retry_on_failure: bool,
+    compass_autosave: bool,
+    compass_sensors: Vec<CompassSensorStatus>,
 }
 
 #[derive(Default)]
 pub struct CalibrationService(Mutex<Session>);
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CompassSensorStatus {
+    pub compass_id: u8,
+    pub progress_percent: u8,
+    pub calibration_state: String,
+    pub fitness: Option<f32>,
+    pub fitness_source: &'static str,
+    pub saved: bool,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CompassCalibrationStatus {
+    pub session_id: String,
+    pub status: CalibrationPhase,
+    pub instruction: String,
+    pub sensors: Vec<CompassSensorStatus>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CompassStartRequest {
+    #[serde(default)]
+    pub compass_ids: Vec<u8>,
+    #[serde(default)]
+    pub retry_on_failure: bool,
+    #[serde(default)]
+    pub autosave: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CompassSessionRequest {
+    pub session_id: String,
+}
+
+fn compass_status(session: &Session) -> Result<CompassCalibrationStatus, String> {
+    let session_id = session
+        .compass_session_id
+        .clone()
+        .ok_or("No compass calibration session exists.")?;
+    let progress = session
+        .status
+        .calibration
+        .as_ref()
+        .filter(|progress| progress.kind == CalibrationKind::Compass)
+        .ok_or("No compass calibration session exists.")?;
+    Ok(CompassCalibrationStatus {
+        session_id,
+        status: progress.phase.clone(),
+        instruction: progress.message.clone(),
+        sensors: session.compass_sensors.clone(),
+    })
+}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AccelerometerCalibrationStatus {
@@ -705,17 +772,24 @@ fn change(
     generation: u64,
     f: impl FnOnce(&mut Session),
 ) {
-    let (snapshot, accelerometer) = {
+    let (snapshot, accelerometer, compass) = {
         let mut session = service.0.lock().unwrap();
         if session.generation != generation {
             return;
         }
         f(&mut session);
-        (session.status.clone(), accelerometer_status(&session).ok())
+        (
+            session.status.clone(),
+            accelerometer_status(&session).ok(),
+            compass_status(&session).ok(),
+        )
     };
     let _ = app.emit("datum://vehicle", snapshot);
     if let Some(accelerometer) = accelerometer {
         let _ = app.emit("datum://accelerometer", accelerometer);
+    }
+    if let Some(compass) = compass {
+        let _ = app.emit("datum://compass", compass);
     }
 }
 
@@ -928,6 +1002,184 @@ pub fn cancel_accelerometer_calibration(
     accelerometer_status(&session)
 }
 
+fn compass_mask(compass_ids: &[u8]) -> Result<u8, String> {
+    if compass_ids.iter().any(|id| *id > 7) {
+        return Err("INVALID_COMPASS_ID: compass IDs must be between 0 and 7.".into());
+    }
+    Ok(compass_ids.iter().fold(0u8, |mask, id| mask | (1u8 << id)))
+}
+
+#[tauri::command]
+pub fn compass_sensors(
+    service: State<'_, CalibrationService>,
+) -> Result<Vec<CompassSensorStatus>, String> {
+    let session = service.0.lock().unwrap();
+    if !session.compass_sensors.is_empty() {
+        return Ok(session.compass_sensors.clone());
+    }
+    let detected = session.status.sensors.iter().any(|sensor| {
+        sensor.kind == CalibrationKind::Compass && sensor.condition != SensorCondition::Unknown
+    });
+    if !detected {
+        return Ok(Vec::new());
+    }
+    Ok(vec![CompassSensorStatus {
+        compass_id: 0,
+        progress_percent: 0,
+        calibration_state: "detected".into(),
+        fitness: None,
+        fitness_source: "not_available",
+        saved: false,
+        failure_reason: None,
+    }])
+}
+
+#[tauri::command]
+pub fn start_compass_calibration(
+    request: CompassStartRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<CompassCalibrationStatus, String> {
+    let mask = compass_mask(&request.compass_ids)?;
+    let mut session = service.0.lock().unwrap();
+    if session.status.firmware != Some(Firmware::ArduPilot) {
+        return Err(
+            "UNSUPPORTED_FEATURE: onboard compass calibration currently requires ArduPilot.".into(),
+        );
+    }
+    if session.status.armed != Some(false) {
+        return Err("Disarm the vehicle before compass calibration.".into());
+    }
+    if session.status.calibration.as_ref().is_some_and(|progress| {
+        matches!(
+            progress.phase,
+            CalibrationPhase::Starting
+                | CalibrationPhase::Accepted
+                | CalibrationPhase::InProgress
+                | CalibrationPhase::AwaitingUser
+                | CalibrationPhase::Stopping
+        )
+    }) {
+        return Err("Finish or cancel the active calibration first.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::StartCompass {
+            mask,
+            retry_on_failure: request.retry_on_failure,
+            autosave: request.autosave,
+        })
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    session.compass_session_id = Some(format!("compass-{}-{millis}", session.generation));
+    session.compass_mask = mask;
+    session.compass_retry_on_failure = request.retry_on_failure;
+    session.compass_autosave = request.autosave;
+    session.compass_sensors = request
+        .compass_ids
+        .iter()
+        .map(|id| CompassSensorStatus {
+            compass_id: *id,
+            progress_percent: 0,
+            calibration_state: "starting".into(),
+            fitness: None,
+            fitness_source: "not_available",
+            saved: false,
+            failure_reason: None,
+        })
+        .collect();
+    session.status.calibration = Some(CalibrationProgress {
+        kind: CalibrationKind::Compass,
+        phase: CalibrationPhase::Starting,
+        percent: None,
+        message: "Starting onboard compass calibration".into(),
+    });
+    compass_status(&session)
+}
+
+#[tauri::command]
+pub fn compass_calibration_status(
+    service: State<'_, CalibrationService>,
+) -> Result<CompassCalibrationStatus, String> {
+    compass_status(&service.0.lock().unwrap())
+}
+
+fn send_compass_action(
+    request: CompassSessionRequest,
+    command: mav::MavCmd,
+    service: &CalibrationService,
+) -> Result<CompassCalibrationStatus, String> {
+    let session = service.0.lock().unwrap();
+    if session.compass_session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("INVALID_SESSION: compass calibration session does not match.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::CompassAction {
+            command,
+            mask: session.compass_mask,
+        })
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    compass_status(&session)
+}
+
+#[tauri::command]
+pub fn accept_compass_calibration(
+    request: CompassSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<CompassCalibrationStatus, String> {
+    send_compass_action(request, mav::MavCmd::MAV_CMD_DO_ACCEPT_MAG_CAL, &service)
+}
+
+#[tauri::command]
+pub fn cancel_compass_calibration(
+    request: CompassSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<CompassCalibrationStatus, String> {
+    send_compass_action(request, mav::MavCmd::MAV_CMD_DO_CANCEL_MAG_CAL, &service)
+}
+
+#[tauri::command]
+pub fn retry_compass_calibration(
+    request: CompassSessionRequest,
+    service: State<'_, CalibrationService>,
+) -> Result<CompassCalibrationStatus, String> {
+    let mut session = service.0.lock().unwrap();
+    if session.compass_session_id.as_deref() != Some(request.session_id.as_str()) {
+        return Err("INVALID_SESSION: compass calibration session does not match.".into());
+    }
+    session
+        .sender
+        .as_ref()
+        .ok_or("Vehicle connection is unavailable.")?
+        .send(WorkerCommand::StartCompass {
+            mask: session.compass_mask,
+            retry_on_failure: session.compass_retry_on_failure,
+            autosave: session.compass_autosave,
+        })
+        .map_err(|_| "Vehicle connection was lost.".to_string())?;
+    for sensor in &mut session.compass_sensors {
+        sensor.progress_percent = 0;
+        sensor.calibration_state = "starting".into();
+        sensor.fitness = None;
+        sensor.saved = false;
+        sensor.failure_reason = None;
+    }
+    session.status.calibration = Some(CalibrationProgress {
+        kind: CalibrationKind::Compass,
+        phase: CalibrationPhase::Starting,
+        percent: None,
+        message: "Retrying onboard compass calibration".into(),
+    });
+    compass_status(&session)
+}
+
 #[tauri::command]
 pub fn stop_calibration(service: State<'_, CalibrationService>) -> Result<(), String> {
     let session = service.0.lock().unwrap();
@@ -990,6 +1242,7 @@ fn run_vehicle(
     let mut stopping: Option<Instant> = None;
     let mut compass_expected = 0u8;
     let mut compass_success = 0u8;
+    let mut compass_action: Option<mav::MavCmd> = None;
     let mut awaiting_position: Option<f32> = None;
     let mut pending_frame_read: Option<(
         mpsc::Sender<Result<FrameConfiguration, String>>,
@@ -1118,6 +1371,110 @@ fn run_vehicle(
                         let _ = reply.send(Err(error));
                     } else {
                         pending_frame_read = Some((reply, None, None, Instant::now()));
+                    }
+                }
+                WorkerCommand::StartCompass {
+                    mask,
+                    retry_on_failure,
+                    autosave,
+                } => {
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        continue;
+                    };
+                    for message_id in [191.0, 192.0] {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let request = mav::COMMAND_LONG_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            command: mav::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                            confirmation: 0,
+                            param1: message_id,
+                            param2: 500_000.0,
+                            param3: 0.0,
+                            param4: 0.0,
+                            param5: 0.0,
+                            param6: 0.0,
+                            param7: 0.0,
+                        };
+                        let _ = connection.send(&header, &mav::MavMessage::COMMAND_LONG(request));
+                    }
+                    sequence = sequence.wrapping_add(1);
+                    let header = MavHeader {
+                        system_id: 255,
+                        component_id: 190,
+                        sequence,
+                    };
+                    let request = mav::COMMAND_LONG_DATA {
+                        target_system: system_id,
+                        target_component: component_id,
+                        command: mav::MavCmd::MAV_CMD_DO_START_MAG_CAL,
+                        confirmation: 0,
+                        param1: mask as f32,
+                        param2: u8::from(retry_on_failure) as f32,
+                        param3: u8::from(autosave) as f32,
+                        param4: 0.0,
+                        param5: 0.0,
+                        param6: 0.0,
+                        param7: 0.0,
+                    };
+                    match connection.send(&header, &mav::MavMessage::COMMAND_LONG(request)) {
+                        Ok(_) => {
+                            pending = Some((
+                                CalibrationKind::Compass,
+                                mav::MavCmd::MAV_CMD_DO_START_MAG_CAL,
+                                Instant::now(),
+                            ));
+                            compass_expected = mask;
+                            compass_success = 0;
+                        }
+                        Err(error) => change(&app, &service, generation, |s| {
+                            if let Some(progress) = &mut s.status.calibration {
+                                progress.phase = CalibrationPhase::Failed;
+                                progress.message =
+                                    format!("Could not start compass calibration: {error}");
+                            }
+                        }),
+                    }
+                }
+                WorkerCommand::CompassAction { command, mask } => {
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        continue;
+                    };
+                    sequence = sequence.wrapping_add(1);
+                    let header = MavHeader {
+                        system_id: 255,
+                        component_id: 190,
+                        sequence,
+                    };
+                    let request = mav::COMMAND_LONG_DATA {
+                        target_system: system_id,
+                        target_component: component_id,
+                        command,
+                        confirmation: 0,
+                        param1: mask as f32,
+                        param2: 0.0,
+                        param3: 0.0,
+                        param4: 0.0,
+                        param5: 0.0,
+                        param6: 0.0,
+                        param7: 0.0,
+                    };
+                    if connection
+                        .send(&header, &mav::MavMessage::COMMAND_LONG(request))
+                        .is_ok()
+                    {
+                        compass_action = Some(command);
                     }
                 }
                 WorkerCommand::Continue => {
@@ -1321,6 +1678,35 @@ fn run_vehicle(
                     });
                 }
                 mav::MavMessage::COMMAND_ACK(ack) => {
+                    if compass_action == Some(ack.command) {
+                        let action = compass_action.take();
+                        let accepted = ack.result == mav::MavResult::MAV_RESULT_ACCEPTED;
+                        change(&app, &service, generation, |s| {
+                            if let Some(progress) = &mut s.status.calibration {
+                                if accepted
+                                    && action == Some(mav::MavCmd::MAV_CMD_DO_CANCEL_MAG_CAL)
+                                {
+                                    progress.phase = CalibrationPhase::Stopped;
+                                    progress.message =
+                                        "Compass calibration cancelled by the flight controller"
+                                            .into();
+                                } else if accepted {
+                                    progress.message =
+                                        "Compass calibration results accepted by the flight controller".into();
+                                } else {
+                                    progress.phase = CalibrationPhase::Failed;
+                                    progress.message = format!(
+                                        "Flight controller rejected compass action: {:?}",
+                                        ack.result
+                                    );
+                                }
+                            }
+                        });
+                        if action == Some(mav::MavCmd::MAV_CMD_DO_CANCEL_MAG_CAL) {
+                            pending = None;
+                        }
+                        continue;
+                    }
                     if let Some((kind, command_id, _)) = pending {
                         if ack.command == command_id {
                             if let Some((_, _, last_activity)) = &mut pending {
@@ -1573,6 +1959,26 @@ fn run_vehicle(
                         }
                         compass_expected |= progress.cal_mask;
                         change(&app, &service, generation, |s| {
+                            let sensor = if let Some(sensor) = s
+                                .compass_sensors
+                                .iter_mut()
+                                .find(|sensor| sensor.compass_id == progress.compass_id)
+                            {
+                                sensor
+                            } else {
+                                s.compass_sensors.push(CompassSensorStatus {
+                                    compass_id: progress.compass_id,
+                                    progress_percent: 0,
+                                    calibration_state: "running".into(),
+                                    fitness: None,
+                                    fitness_source: "not_available",
+                                    saved: false,
+                                    failure_reason: None,
+                                });
+                                s.compass_sensors.last_mut().unwrap()
+                            };
+                            sensor.progress_percent = progress.completion_pct;
+                            sensor.calibration_state = "running".into();
                             s.status.calibration = Some(CalibrationProgress {
                             kind: CalibrationKind::Compass, phase: CalibrationPhase::InProgress,
                             percent: Some(progress.completion_pct), message: "Rotate the drone as instructed until compass calibration finishes".into(),
@@ -1585,14 +1991,55 @@ fn run_vehicle(
                         compass_expected |= report.cal_mask;
                         if report.compass_id < 8 {
                             let bit = 1u8 << report.compass_id;
-                            if report.cal_status == mav::MagCalStatus::MAG_CAL_SUCCESS
-                                && report.autosaved == 1
-                            {
+                            let succeeded = report.cal_status == mav::MagCalStatus::MAG_CAL_SUCCESS;
+                            let autosave_required = service.0.lock().unwrap().compass_autosave;
+                            if succeeded && (!autosave_required || report.autosaved == 1) {
                                 compass_success |= bit;
+                                change(&app, &service, generation, |s| {
+                                    let sensor = if let Some(sensor) = s
+                                        .compass_sensors
+                                        .iter_mut()
+                                        .find(|sensor| sensor.compass_id == report.compass_id)
+                                    {
+                                        sensor
+                                    } else {
+                                        s.compass_sensors.push(CompassSensorStatus {
+                                            compass_id: report.compass_id,
+                                            progress_percent: 100,
+                                            calibration_state: "report_received".into(),
+                                            fitness: None,
+                                            fitness_source: "firmware_report",
+                                            saved: false,
+                                            failure_reason: None,
+                                        });
+                                        s.compass_sensors.last_mut().unwrap()
+                                    };
+                                    sensor.progress_percent = 100;
+                                    sensor.calibration_state = if report.autosaved == 1 {
+                                        "saved".into()
+                                    } else {
+                                        "fit_complete_awaiting_accept".into()
+                                    };
+                                    sensor.fitness = Some(report.fitness);
+                                    sensor.fitness_source = "firmware_report";
+                                    sensor.saved = report.autosaved == 1;
+                                    sensor.failure_reason = None;
+                                });
                             } else {
                                 pending = None;
                                 stopping = None;
                                 change(&app, &service, generation, |s| {
+                                    if let Some(sensor) = s
+                                        .compass_sensors
+                                        .iter_mut()
+                                        .find(|sensor| sensor.compass_id == report.compass_id)
+                                    {
+                                        sensor.calibration_state = "failed".into();
+                                        sensor.fitness = Some(report.fitness);
+                                        sensor.fitness_source = "firmware_report";
+                                        sensor.failure_reason =
+                                            Some(format!("{:?}", report.cal_status));
+                                    }
                                     s.status.calibration = Some(CalibrationProgress {
                                         kind: CalibrationKind::Compass,
                                         phase: CalibrationPhase::Failed,
@@ -1613,9 +2060,15 @@ fn run_vehicle(
                             stopping = None;
                             change(&app, &service, generation, |s| {
                                 s.status.calibration = Some(CalibrationProgress {
-                                kind: CalibrationKind::Compass, phase: CalibrationPhase::Completed, percent: Some(100),
-                                message: "All reported compasses calibrated and saved. Reboot the vehicle before flight.".into(),
-                            })
+                                    kind: CalibrationKind::Compass,
+                                    phase: CalibrationPhase::Completed,
+                                    percent: Some(100),
+                                    message: if s.compass_autosave {
+                                        "All reported compasses calibrated and saved. Reboot the vehicle before flight.".into()
+                                    } else {
+                                        "All reported compass fits succeeded. Accept the results to save them.".into()
+                                    },
+                                })
                             });
                         }
                     }
@@ -1836,6 +2289,9 @@ mod tests {
                 .unwrap(),
             [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]
         );
+        assert_eq!(compass_mask(&[]).unwrap(), 0);
+        assert_eq!(compass_mask(&[0, 2]).unwrap(), 5);
+        assert!(compass_mask(&[8]).is_err());
     }
 
     #[test]
