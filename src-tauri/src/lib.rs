@@ -44,6 +44,13 @@ pub fn run() {
             calibration::advance_esc_calibration,
             calibration::esc_calibration_status,
             calibration::cancel_esc_calibration,
+            calibration::flight_mode_configuration,
+            calibration::set_flight_mode_configuration,
+            calibration::failsafe_configuration,
+            calibration::set_failsafe_configuration,
+            calibration::battery_configuration,
+            calibration::set_battery_configuration,
+            calibration::calibrate_battery_voltage,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])

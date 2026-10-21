@@ -675,6 +675,10 @@ struct Session {
     esc_session_id: Option<String>,
     esc_step: usize,
     esc_active: bool,
+    battery_voltage_v: Option<f32>,
+    battery_current_a: Option<f32>,
+    battery_remaining_percent: Option<i8>,
+    active_mode: Option<u32>,
 }
 
 #[derive(Default)]
@@ -782,6 +786,55 @@ fn esc_protocol(value: u8) -> (&'static str, bool) {
         3 => ("brushed", false),
         _ => ("normal_pwm", true),
     }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FlightModeConfiguration {
+    pub mode_channel: u8,
+    pub slots: Vec<u8>,
+    pub active_mode: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct FlightModeUpdate {
+    pub mode_channel: u8,
+    pub slots: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct FailsafeConfiguration {
+    pub throttle_action: u8,
+    pub battery_action: u8,
+    pub battery_critical_action: u8,
+    pub gcs_action: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatteryConfiguration {
+    pub monitor_type: u8,
+    pub capacity_mah: f32,
+    pub voltage_multiplier: f32,
+    pub amps_per_volt: f32,
+    pub low_voltage: f32,
+    pub critical_voltage: f32,
+    pub voltage_v: Option<f32>,
+    pub current_a: Option<f32>,
+    pub remaining_percent: Option<i8>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BatteryUpdate {
+    pub monitor_type: u8,
+    pub capacity_mah: f32,
+    pub voltage_multiplier: f32,
+    pub amps_per_volt: f32,
+    pub low_voltage: f32,
+    pub critical_voltage: f32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct BatteryVoltageCalibration {
+    pub measured_voltage: f32,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1608,6 +1661,190 @@ pub fn cancel_esc_calibration(
 }
 
 #[tauri::command]
+pub fn flight_mode_configuration(
+    service: State<'_, CalibrationService>,
+) -> Result<FlightModeConfiguration, String> {
+    let values = read_parameters(
+        &service,
+        &[
+            "FLTMODE1",
+            "FLTMODE2",
+            "FLTMODE3",
+            "FLTMODE4",
+            "FLTMODE5",
+            "FLTMODE6",
+            "FLTMODE_CH",
+        ],
+    )?;
+    Ok(FlightModeConfiguration {
+        mode_channel: values["FLTMODE_CH"].round() as u8,
+        slots: (1..=6)
+            .map(|index| values[&format!("FLTMODE{index}")].round() as u8)
+            .collect(),
+        active_mode: service.0.lock().unwrap().active_mode,
+    })
+}
+
+#[tauri::command]
+pub fn set_flight_mode_configuration(
+    request: FlightModeUpdate,
+    service: State<'_, CalibrationService>,
+) -> Result<FlightModeConfiguration, String> {
+    if request.slots.len() != 6 || !(1..=16).contains(&request.mode_channel) {
+        return Err(
+            "INVALID_FLIGHT_MODE_CONFIGURATION: provide six slots and a channel from 1 to 16."
+                .into(),
+        );
+    }
+    const MODES: &[u8] = &[
+        0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    ];
+    if request.slots.iter().any(|mode| !MODES.contains(mode)) {
+        return Err(
+            "UNSUPPORTED_FLIGHT_MODE: a slot contains an unknown ArduCopter mode value.".into(),
+        );
+    }
+    let mut parameters = BTreeMap::from([("FLTMODE_CH".into(), request.mode_channel as f32)]);
+    for (index, mode) in request.slots.iter().enumerate() {
+        parameters.insert(format!("FLTMODE{}", index + 1), *mode as f32);
+    }
+    write_parameters(&service, parameters)?;
+    flight_mode_configuration(service)
+}
+
+#[tauri::command]
+pub fn failsafe_configuration(
+    service: State<'_, CalibrationService>,
+) -> Result<FailsafeConfiguration, String> {
+    let values = read_parameters(
+        &service,
+        &[
+            "FS_THR_ENABLE",
+            "BATT_FS_LOW_ACT",
+            "BATT_FS_CRT_ACT",
+            "FS_GCS_ENABLE",
+        ],
+    )?;
+    Ok(FailsafeConfiguration {
+        throttle_action: values["FS_THR_ENABLE"].round() as u8,
+        battery_action: values["BATT_FS_LOW_ACT"].round() as u8,
+        battery_critical_action: values["BATT_FS_CRT_ACT"].round() as u8,
+        gcs_action: values["FS_GCS_ENABLE"].round() as u8,
+    })
+}
+
+#[tauri::command]
+pub fn set_failsafe_configuration(
+    request: FailsafeConfiguration,
+    service: State<'_, CalibrationService>,
+) -> Result<FailsafeConfiguration, String> {
+    if request.throttle_action > 7
+        || request.battery_action > 5
+        || request.battery_critical_action > 5
+        || request.gcs_action > 7
+    {
+        return Err("INVALID_FAILSAFE_ACTION: an action is outside the supported ArduPilot parameter range.".into());
+    }
+    write_parameters(
+        &service,
+        BTreeMap::from([
+            ("FS_THR_ENABLE".into(), request.throttle_action as f32),
+            ("BATT_FS_LOW_ACT".into(), request.battery_action as f32),
+            (
+                "BATT_FS_CRT_ACT".into(),
+                request.battery_critical_action as f32,
+            ),
+            ("FS_GCS_ENABLE".into(), request.gcs_action as f32),
+        ]),
+    )?;
+    failsafe_configuration(service)
+}
+
+fn battery_from_values(session: &Session, values: &BTreeMap<String, f32>) -> BatteryConfiguration {
+    BatteryConfiguration {
+        monitor_type: values["BATT_MONITOR"].round() as u8,
+        capacity_mah: values["BATT_CAPACITY"],
+        voltage_multiplier: values["BATT_VOLT_MULT"],
+        amps_per_volt: values["BATT_AMP_PERVLT"],
+        low_voltage: values["BATT_LOW_VOLT"],
+        critical_voltage: values["BATT_CRT_VOLT"],
+        voltage_v: session.battery_voltage_v,
+        current_a: session.battery_current_a,
+        remaining_percent: session.battery_remaining_percent,
+    }
+}
+
+const BATTERY_PARAMS: &[&str] = &[
+    "BATT_MONITOR",
+    "BATT_CAPACITY",
+    "BATT_VOLT_MULT",
+    "BATT_AMP_PERVLT",
+    "BATT_LOW_VOLT",
+    "BATT_CRT_VOLT",
+];
+
+#[tauri::command]
+pub fn battery_configuration(
+    service: State<'_, CalibrationService>,
+) -> Result<BatteryConfiguration, String> {
+    let values = read_parameters(&service, BATTERY_PARAMS)?;
+    Ok(battery_from_values(&service.0.lock().unwrap(), &values))
+}
+
+#[tauri::command]
+pub fn set_battery_configuration(
+    request: BatteryUpdate,
+    service: State<'_, CalibrationService>,
+) -> Result<BatteryConfiguration, String> {
+    if request.capacity_mah <= 0.0
+        || request.voltage_multiplier <= 0.0
+        || request.amps_per_volt < 0.0
+        || request.low_voltage <= request.critical_voltage
+        || request.critical_voltage <= 0.0
+    {
+        return Err(
+            "INVALID_BATTERY_CONFIGURATION: check capacity, scaling, and voltage thresholds."
+                .into(),
+        );
+    }
+    write_parameters(
+        &service,
+        BTreeMap::from([
+            ("BATT_MONITOR".into(), request.monitor_type as f32),
+            ("BATT_CAPACITY".into(), request.capacity_mah),
+            ("BATT_VOLT_MULT".into(), request.voltage_multiplier),
+            ("BATT_AMP_PERVLT".into(), request.amps_per_volt),
+            ("BATT_LOW_VOLT".into(), request.low_voltage),
+            ("BATT_CRT_VOLT".into(), request.critical_voltage),
+        ]),
+    )?;
+    battery_configuration(service)
+}
+
+#[tauri::command]
+pub fn calibrate_battery_voltage(
+    request: BatteryVoltageCalibration,
+    service: State<'_, CalibrationService>,
+) -> Result<BatteryConfiguration, String> {
+    let telemetry_voltage = service
+        .0
+        .lock()
+        .unwrap()
+        .battery_voltage_v
+        .ok_or("NO_BATTERY_TELEMETRY: wait for SYS_STATUS battery voltage.")?;
+    if !(1.0..=100.0).contains(&request.measured_voltage) || telemetry_voltage <= 0.0 {
+        return Err("INVALID_MEASURED_VOLTAGE".into());
+    }
+    let values = read_parameters(&service, BATTERY_PARAMS)?;
+    let multiplier = values["BATT_VOLT_MULT"] * request.measured_voltage / telemetry_voltage;
+    write_parameters(
+        &service,
+        BTreeMap::from([("BATT_VOLT_MULT".into(), multiplier)]),
+    )?;
+    battery_configuration(service)
+}
+
+#[tauri::command]
 pub fn stop_calibration(service: State<'_, CalibrationService>) -> Result<(), String> {
     let session = service.0.lock().unwrap();
     match session.status.calibration.as_ref().map(|c| &c.phase) {
@@ -2205,6 +2442,7 @@ fn run_vehicle(
                         }
                         s.status.system_id = Some(header.system_id);
                         s.status.component_id = Some(header.component_id);
+                        s.active_mode = Some(heartbeat.custom_mode);
                         s.status.armed = Some(
                             heartbeat
                                 .base_mode
@@ -2621,6 +2859,12 @@ fn run_vehicle(
                 mav::MavMessage::SYS_STATUS(status) => {
                     change(&app, &service, generation, |s| {
                         if s.status.system_id == Some(header.system_id) {
+                            s.battery_voltage_v = (status.voltage_battery != u16::MAX)
+                                .then_some(status.voltage_battery as f32 / 1000.0);
+                            s.battery_current_a = (status.current_battery != -1)
+                                .then_some(status.current_battery as f32 / 100.0);
+                            s.battery_remaining_percent =
+                                (status.battery_remaining >= 0).then_some(status.battery_remaining);
                             s.status.sensors = sensor_readings(
                                 status.onboard_control_sensors_present.bits(),
                                 status.onboard_control_sensors_health.bits(),
