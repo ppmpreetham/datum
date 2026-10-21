@@ -180,6 +180,15 @@ pub struct FrameOptionsResponse {
     pub status: &'static str,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct FrameConfiguration {
+    pub frame_class: Option<String>,
+    pub frame_type: Option<String>,
+    pub frame_class_value: f32,
+    pub frame_type_value: f32,
+    pub reboot_required: bool,
+}
+
 fn frame_type(
     id: &'static str,
     label: &'static str,
@@ -303,6 +312,26 @@ fn ardupilot_frame_options() -> FrameOptionsResponse {
     }
 }
 
+fn resolve_frame_configuration(class_value: f32, type_value: f32) -> FrameConfiguration {
+    let options = ardupilot_frame_options();
+    let class = options
+        .frame_classes
+        .iter()
+        .find(|item| item.parameter_value as f32 == class_value);
+    let frame_type = class.and_then(|item| {
+        item.types
+            .iter()
+            .find(|kind| kind.parameter_value as f32 == type_value)
+    });
+    FrameConfiguration {
+        frame_class: class.map(|item| item.id.to_string()),
+        frame_type: frame_type.map(|item| item.id.to_string()),
+        frame_class_value: class_value,
+        frame_type_value: type_value,
+        reboot_required: false,
+    }
+}
+
 #[tauri::command]
 pub fn frame_options(
     service: State<'_, CalibrationService>,
@@ -313,6 +342,45 @@ pub fn frame_options(
         Some(Firmware::Px4) => Err("UNSUPPORTED_FEATURE: PX4 airframes use SYS_AUTOSTART; ArduPilot FRAME_CLASS and FRAME_TYPE values cannot be applied.".into()),
         None => Err("Connect a supported flight controller before requesting frame options.".into()),
     }
+}
+
+#[tauri::command]
+pub fn current_frame(service: State<'_, CalibrationService>) -> Result<FrameConfiguration, String> {
+    let receiver =
+        {
+            let session = service.0.lock().unwrap();
+            match session.status.firmware {
+                Some(Firmware::ArduPilot) => {}
+                Some(Firmware::Px4) => {
+                    return Err(
+                        "UNSUPPORTED_FEATURE: PX4 does not use FRAME_CLASS and FRAME_TYPE.".into(),
+                    )
+                }
+                None => return Err(
+                    "Connect an ArduPilot flight controller before reading frame configuration."
+                        .into(),
+                ),
+            }
+            let (reply, receiver) = mpsc::channel();
+            session
+                .sender
+                .as_ref()
+                .ok_or("Vehicle connection is unavailable.")?
+                .send(WorkerCommand::ReadFrame(reply))
+                .map_err(|_| "Vehicle connection was lost.".to_string())?;
+            receiver
+        };
+    receiver.recv_timeout(Duration::from_secs(6)).map_err(|_| {
+        "Timed out reading FRAME_CLASS and FRAME_TYPE from the flight controller.".to_string()
+    })?
+}
+
+fn parameter_id(name: &str) -> [u8; 16] {
+    let mut result = [0; 16];
+    let bytes = name.as_bytes();
+    let length = bytes.len().min(result.len());
+    result[..length].copy_from_slice(&bytes[..length]);
+    result
 }
 
 #[tauri::command]
@@ -373,6 +441,7 @@ enum WorkerCommand {
     Start(CalibrationKind),
     Continue,
     Stop,
+    ReadFrame(mpsc::Sender<Result<FrameConfiguration, String>>),
     Disconnect,
 }
 
@@ -643,6 +712,12 @@ fn run_vehicle(
     let mut compass_expected = 0u8;
     let mut compass_success = 0u8;
     let mut awaiting_position: Option<f32> = None;
+    let mut pending_frame_read: Option<(
+        mpsc::Sender<Result<FrameConfiguration, String>>,
+        Option<f32>,
+        Option<f32>,
+        Instant,
+    )> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -666,6 +741,46 @@ fn run_vehicle(
         while let Ok(command) = commands.try_recv() {
             match command {
                 WorkerCommand::Disconnect => return,
+                WorkerCommand::ReadFrame(reply) => {
+                    if pending_frame_read.is_some() {
+                        let _ = reply
+                            .send(Err("A frame parameter read is already in progress.".into()));
+                        continue;
+                    }
+                    let status = service.0.lock().unwrap().status.clone();
+                    let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    else {
+                        let _ = reply.send(Err("Vehicle identity is not available yet.".into()));
+                        continue;
+                    };
+                    let mut send_error = None;
+                    for name in ["FRAME_CLASS", "FRAME_TYPE"] {
+                        sequence = sequence.wrapping_add(1);
+                        let header = MavHeader {
+                            system_id: 255,
+                            component_id: 190,
+                            sequence,
+                        };
+                        let request = mav::PARAM_REQUEST_READ_DATA {
+                            target_system: system_id,
+                            target_component: component_id,
+                            param_id: parameter_id(name).into(),
+                            param_index: -1,
+                        };
+                        if let Err(error) =
+                            connection.send(&header, &mav::MavMessage::PARAM_REQUEST_READ(request))
+                        {
+                            send_error = Some(format!("Could not request {name}: {error}"));
+                            break;
+                        }
+                    }
+                    if let Some(error) = send_error {
+                        let _ = reply.send(Err(error));
+                    } else {
+                        pending_frame_read = Some((reply, None, None, Instant::now()));
+                    }
+                }
                 WorkerCommand::Continue => {
                     if let Some(position) = awaiting_position {
                         let status = service.0.lock().unwrap().status.clone();
@@ -955,6 +1070,31 @@ fn run_vehicle(
                         }
                     }
                 }
+                mav::MavMessage::PARAM_VALUE(parameter) => {
+                    if let Some((_, class_value, type_value, _)) = &mut pending_frame_read {
+                        match parameter.param_id.to_str().unwrap_or_default() {
+                            "FRAME_CLASS" => *class_value = Some(parameter.param_value),
+                            "FRAME_TYPE" => *type_value = Some(parameter.param_value),
+                            _ => {}
+                        }
+                    }
+                    let completed =
+                        pending_frame_read
+                            .as_ref()
+                            .and_then(|(_, class_value, type_value, _)| {
+                                match (*class_value, *type_value) {
+                                    (Some(class_value), Some(type_value)) => {
+                                        Some(resolve_frame_configuration(class_value, type_value))
+                                    }
+                                    _ => None,
+                                }
+                            });
+                    if let Some(configuration) = completed {
+                        if let Some((reply, _, _, _)) = pending_frame_read.take() {
+                            let _ = reply.send(Ok(configuration));
+                        }
+                    }
+                }
                 mav::MavMessage::COMMAND_LONG(request)
                     if request.command == mav::MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS =>
                 {
@@ -1106,6 +1246,17 @@ fn run_vehicle(
                 }
             });
         }
+        if pending_frame_read
+            .as_ref()
+            .is_some_and(|(_, _, _, started)| started.elapsed() > Duration::from_secs(5))
+        {
+            if let Some((reply, _, _, _)) = pending_frame_read.take() {
+                let _ = reply.send(Err(
+                    "Timed out waiting for FRAME_CLASS or FRAME_TYPE from the flight controller."
+                        .into(),
+                ));
+            }
+        }
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1168,6 +1319,20 @@ mod tests {
             .unwrap();
         assert_eq!(y6.parameter_value, 5);
         assert_eq!(y6.types.len(), 2);
+    }
+
+    #[test]
+    fn frame_parameter_values_resolve_without_hiding_unknown_values() {
+        let known = resolve_frame_configuration(1.0, 1.0);
+        assert_eq!(known.frame_class.as_deref(), Some("quad"));
+        assert_eq!(known.frame_type.as_deref(), Some("x"));
+        assert!(!known.reboot_required);
+
+        let unknown = resolve_frame_configuration(99.0, 42.0);
+        assert_eq!(unknown.frame_class, None);
+        assert_eq!(unknown.frame_type, None);
+        assert_eq!(unknown.frame_class_value, 99.0);
+        assert_eq!(unknown.frame_type_value, 42.0);
     }
 
     #[test]
