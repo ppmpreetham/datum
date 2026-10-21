@@ -1,5 +1,6 @@
 use mavlink::{ardupilotmega as mav, MavConnection, MavHeader};
 use serde::{Deserialize, Serialize};
+use serialport::{SerialPortInfo, SerialPortType};
 use std::{
     sync::{mpsc, Mutex},
     thread,
@@ -226,6 +227,58 @@ struct Session {
 #[derive(Default)]
 pub struct CalibrationService(Mutex<Session>);
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialPortSummary {
+    pub port_name: String,
+    pub port_type: &'static str,
+    pub usb_vendor_id: Option<u16>,
+    pub usb_product_id: Option<u16>,
+    pub manufacturer: Option<String>,
+    pub product: Option<String>,
+    pub serial_number: Option<String>,
+}
+
+fn port_summary(port: SerialPortInfo) -> SerialPortSummary {
+    let (port_type, usb_vendor_id, usb_product_id, manufacturer, product, serial_number) =
+        match port.port_type {
+            SerialPortType::UsbPort(info) => (
+                "usb",
+                Some(info.vid),
+                Some(info.pid),
+                info.manufacturer,
+                info.product,
+                info.serial_number,
+            ),
+            SerialPortType::BluetoothPort => ("bluetooth", None, None, None, None, None),
+            SerialPortType::PciPort => ("pci", None, None, None, None, None),
+            SerialPortType::Unknown => ("unknown", None, None, None, None, None),
+        };
+    SerialPortSummary {
+        port_name: port.port_name,
+        port_type,
+        usb_vendor_id,
+        usb_product_id,
+        manufacturer,
+        product,
+        serial_number,
+    }
+}
+
+#[tauri::command]
+pub fn list_serial_ports() -> Result<Vec<SerialPortSummary>, String> {
+    let mut ports = serialport::available_ports()
+        .map_err(|error| format!("Could not list Windows serial ports: {error}"))?
+        .into_iter()
+        .map(port_summary)
+        .collect::<Vec<_>>();
+    ports.sort_by(|left, right| {
+        (left.port_type != "usb", &left.port_name)
+            .cmp(&(right.port_type != "usb", &right.port_name))
+    });
+    Ok(ports)
+}
+
 fn validate_address(address: &str) -> Result<(), String> {
     let parts: Vec<&str> = address.split(':').collect();
     if parts.len() != 3 {
@@ -287,6 +340,25 @@ pub fn connect_vehicle(
     let _ = app.emit("datum://vehicle", snapshot.clone());
     thread::spawn(move || run_vehicle(app, generation, address, receiver));
     Ok(snapshot)
+}
+
+#[tauri::command]
+pub fn connect_serial_vehicle(
+    port_name: String,
+    baud_rate: u32,
+    app: AppHandle,
+    service: State<'_, CalibrationService>,
+) -> Result<VehicleStatus, String> {
+    if baud_rate == 0 {
+        return Err("Select a baud rate greater than zero.".into());
+    }
+    let ports = list_serial_ports()?;
+    if !ports.iter().any(|port| port.port_name == port_name) {
+        return Err(format!(
+            "{port_name} is not an available serial port. Refresh the port list."
+        ));
+    }
+    connect_vehicle(format!("serial:{port_name}:{baud_rate}"), app, service)
 }
 
 #[tauri::command]
@@ -882,6 +954,26 @@ fn run_vehicle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serial_port_json_uses_frontend_field_names() {
+        let port = SerialPortInfo {
+            port_name: "COM3".into(),
+            port_type: SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid: 0x26ac,
+                pid: 0x0011,
+                serial_number: None,
+                manufacturer: None,
+                product: Some("Legacy FMU".into()),
+            }),
+        };
+        let json = serde_json::to_value(port_summary(port)).unwrap();
+        assert_eq!(json["portName"], "COM3");
+        assert_eq!(json["portType"], "usb");
+        assert_eq!(json["usbVendorId"], 9900);
+        assert_eq!(json["usbProductId"], 17);
+        assert_eq!(json["product"], "Legacy FMU");
+    }
 
     #[test]
     fn unsupported_autopilot_is_rejected() {

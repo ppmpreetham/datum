@@ -27,4 +27,5 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["ws"] }
 futures-util = "0.3"
 mavlink = { version = "0.17.1", default-features = false, features = ["std", "tcp", "udp", "direct-serial", "ardupilotmega"] }
+serialport = "4.10.1"
 
