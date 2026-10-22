@@ -35,12 +35,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Publish to the tag that was pushed (e.g. v1.0); a manual run uses v<app version>.
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "RELEASE_TAG=${{ github.ref_name }}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=v$(node -p "require('./src-tauri/tauri.conf.json').version")" >> "$GITHUB_ENV"
+          fi
+
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
-            librsvg2-dev patchelf libudev-dev libdbus-1-dev pkg-config libssl-dev build-essential
+            librsvg2-dev patchelf xdg-utils libudev-dev libdbus-1-dev pkg-config libssl-dev build-essential
 
       - uses: pnpm/action-setup@v4
         with:
@@ -62,12 +72,12 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - uses: tauri-apps/tauri-action@v0
+      - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: v__VERSION__
-          releaseName: Datum v__VERSION__
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: Datum ${{ env.RELEASE_TAG }}
           releaseBody: |
             Datum desktop installers. Pick the file for your OS from the assets below.
 
@@ -86,7 +96,6 @@ jobs:
         run: |
           cd src-tauri
           cargo build --release --locked --bin mavlink_monitor --target ${{ matrix.target }}
-          version=$(node -p "require('./tauri.conf.json').version")
           ext=""; [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
           cp "target/${{ matrix.target }}/release/mavlink_monitor${ext}" "mavlink_monitor-${{ matrix.suffix }}"
-          gh release upload "v${version}" "mavlink_monitor-${{ matrix.suffix }}" --clobber
+          gh release upload "$RELEASE_TAG" "mavlink_monitor-${{ matrix.suffix }}" --clobber
