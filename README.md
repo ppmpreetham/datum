@@ -8,7 +8,7 @@ Datum turns the dry, form-driven sensor calibration screens of a ground-control 
 
 ## Installation
 
-![https://github.com/ppmpreetham/datum/releases/latest](https://img.shields.io/badge/-Download-0969da?style=for-the-badge)
+[![](https://img.shields.io/badge/-Download-0969da?style=for-the-badge)](https://github.com/ppmpreetham/datum/releases/latest)
 
 ## Screenshots
 
