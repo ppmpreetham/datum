@@ -6,16 +6,9 @@ Datum turns the dry, form-driven sensor calibration screens of a ground-control 
 
 ![Start screen](readme/Start.png)
 
-## Features
+## Installation
 
-- **Seven guided steps:** Connect → Gyroscope → Accelerometer → Compass → Level Horizon → Radio → ESC, with a progress track at the top of the screen.
-- **Live 3D vehicle:** the drone model follows the flight controller's `ATTITUDE` stream, so you see the vehicle move as you handle it.
-- **Ghost-pose hints:** a translucent "ghost" drone and an animated arrow show the next accelerometer pose.
-- **Compass coverage sphere:** a geodesic sphere fills in as the field direction sweeps across the body frame, with a hint arrow toward the largest unpainted patch.
-- **3D FlySky FS-i6 transmitter:** the sticks and switches mirror the live `RC_CHANNELS` input; unused channels are skipped, not rejected.
-- **ESC throttle-range workflow and motor test:** a step-by-step checklist, then per-motor spin tests limited to 1–15 % throttle for at most 5 s.
-- **Simulator mode:** every flow runs with no hardware. Drag the screen to tilt the drone, or use a phone as a motion controller.
-- **Controller-style input:** ✕ / ○ / □ prompts, synthesized sound effects and optional spoken captions.
+![https://github.com/ppmpreetham/datum/releases/latest](https://img.shields.io/badge/-Download-0969da?style=for-the-badge)
 
 ## Screenshots
 
