@@ -10,6 +10,8 @@ use futures_util::{SinkExt, StreamExt};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
 
+const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:8000";
+
 struct AppState {
     tx: broadcast::Sender<String>,
 }
@@ -31,7 +33,7 @@ pub fn publish_drone_attitude(roll_rad: f32, pitch_rad: f32, yaw_rad: f32) {
     let _ = sender.send(message);
 }
 
-pub fn start() {
+pub fn start() -> Result<(), String> {
     let (tx, _rx) = broadcast::channel(100);
     let _ = GYRO_SENDER.set(tx.clone());
     let app_state = Arc::new(AppState { tx });
@@ -41,10 +43,19 @@ pub fn start() {
             .route("/ws/gyro", get(ws_handler))
             .with_state(app_state);
 
-        let listener = tokio::net::TcpListener::bind("0.0.0.0:8000").await.unwrap();
-        println!("WebSocket server running on ws://0.0.0.0:8000/ws/gyro");
-        axum::serve(listener, app).await.unwrap();
+        let listener = match tokio::net::TcpListener::bind(DEFAULT_BIND_ADDRESS).await {
+            Ok(listener) => listener,
+            Err(error) => {
+                log::error!(target: "datum::websocket", "bind failed address={DEFAULT_BIND_ADDRESS} error={error}");
+                return;
+            }
+        };
+        log::info!(target: "datum::websocket", "listening url=ws://{DEFAULT_BIND_ADDRESS}/ws/gyro");
+        if let Err(error) = axum::serve(listener, app).await {
+            log::error!(target: "datum::websocket", "server stopped error={error}");
+        }
     });
+    Ok(())
 }
 
 async fn ws_handler(
@@ -76,5 +87,15 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     tokio::select! {
         _ = (&mut send_task) => recv_task.abort(),
         _ = (&mut recv_task) => send_task.abort(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn websocket_is_local_only_by_default() {
+        assert_eq!(DEFAULT_BIND_ADDRESS, "127.0.0.1:8000");
     }
 }

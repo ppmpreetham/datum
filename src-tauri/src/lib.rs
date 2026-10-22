@@ -1,6 +1,8 @@
 mod calibration;
 mod endpoint_manifest;
+mod logging;
 mod server;
+use tauri::Manager;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -56,8 +58,14 @@ pub fn run() {
             calibration::continue_calibration,
             calibration::stop_calibration
         ])
-        .setup(move |_app| {
-            server::start();
+        .setup(move |app| {
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .map_err(|error| format!("Could not resolve application log directory: {error}"))?;
+            let log_path = logging::init(&log_dir)?;
+            log::info!(target: "datum::startup", "backend starting log_path={}", log_path.display());
+            server::start()?;
             Ok(())
         })
         .run(tauri::generate_context!())

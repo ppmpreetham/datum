@@ -1079,14 +1079,22 @@ fn change(
             radio_status(&session),
         )
     };
-    let _ = app.emit("datum://vehicle", snapshot);
+    if let Err(error) = app.emit("datum://vehicle", snapshot) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     if let Some(accelerometer) = accelerometer {
-        let _ = app.emit("datum://accelerometer", accelerometer);
+        if let Err(error) = app.emit("datum://accelerometer", accelerometer) {
+            log::warn!(target: "datum::events", "emit failed event=accelerometer error={error}");
+        }
     }
     if let Some(compass) = compass {
-        let _ = app.emit("datum://compass", compass);
+        if let Err(error) = app.emit("datum://compass", compass) {
+            log::warn!(target: "datum::events", "emit failed event=compass error={error}");
+        }
     }
-    let _ = app.emit("datum://radio", radio);
+    if let Err(error) = app.emit("datum://radio", radio) {
+        log::warn!(target: "datum::events", "emit failed event=radio error={error}");
+    }
 }
 
 #[tauri::command]
@@ -1101,6 +1109,7 @@ pub fn connect_vehicle(
     service: State<'_, CalibrationService>,
 ) -> Result<VehicleStatus, String> {
     validate_address(&address)?;
+    log::info!(target: "datum::connection", "connect requested address={address}");
     let (sender, receiver) = mpsc::channel();
     let (generation, snapshot) = {
         let mut session = service.0.lock().unwrap();
@@ -1117,7 +1126,9 @@ pub fn connect_vehicle(
         session.sender = Some(sender);
         (session.generation, session.status.clone())
     };
-    let _ = app.emit("datum://vehicle", snapshot.clone());
+    if let Err(error) = app.emit("datum://vehicle", snapshot.clone()) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     thread::spawn(move || run_vehicle(app, generation, address, receiver));
     Ok(snapshot)
 }
@@ -1143,6 +1154,7 @@ pub fn connect_serial_vehicle(
 
 #[tauri::command]
 pub fn disconnect_vehicle(app: AppHandle, service: State<'_, CalibrationService>) -> VehicleStatus {
+    log::info!(target: "datum::connection", "disconnect requested");
     let snapshot = {
         let mut session = service.0.lock().unwrap();
         if let Some(sender) = session.sender.take() {
@@ -1152,7 +1164,9 @@ pub fn disconnect_vehicle(app: AppHandle, service: State<'_, CalibrationService>
         session.status = VehicleStatus::default();
         session.status.clone()
     };
-    let _ = app.emit("datum://vehicle", snapshot.clone());
+    if let Err(error) = app.emit("datum://vehicle", snapshot.clone()) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     snapshot
 }
 
@@ -1168,6 +1182,7 @@ fn start_calibration_inner(
     kind: CalibrationKind,
     service: &CalibrationService,
 ) -> Result<(), String> {
+    log::info!(target: "datum::calibration", "start requested kind={kind:?}");
     let mut session = service.0.lock().unwrap();
     let firmware = session
         .status
@@ -1990,6 +2005,7 @@ fn run_vehicle(
     let connection = match mavlink::connect::<mav::MavMessage>(&address) {
         Ok(connection) => connection,
         Err(error) => {
+            log::error!(target: "datum::connection", "open failed address={address} error={error}");
             change(&app, &service, generation, |s| {
                 s.status.phase = Phase::Error;
                 s.status.message = format!("Could not open vehicle connection: {error}");
@@ -1998,6 +2014,7 @@ fn run_vehicle(
             return;
         }
     };
+    log::info!(target: "datum::connection", "transport opened generation={generation} address={address}");
     let mut last_heartbeat: Option<Instant> = None;
     let started = Instant::now();
     let mut sequence = 0u8;
