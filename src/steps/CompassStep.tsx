@@ -193,7 +193,7 @@ export function CompassStep() {
   useEffect(() => backend.onCompass(setStatus), [backend]);
 
   useEffect(() => {
-    if (phase === "ready") speak("Spin it all the way around — every side, every direction!");
+    if (phase === "ready") speak("Spin it all the way around. Every side, every direction!");
   }, [phase]);
 
   // Refresh the hint + HUD numbers a few times a second (not every frame).

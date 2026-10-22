@@ -17,9 +17,9 @@ type Mapping = Partial<Record<Fn, { channel: number; reversed: boolean }>>;
 const MOVES: { id: string; fn: Fn; dir: 1 | -1; detect: boolean; say: string; hand: "left" | "right"; ghost: StickGhost }[] = [
   { id: "throttle_up", fn: "throttle", dir: 1, detect: true, say: "Throttle all the way up!", hand: "left", ghost: { x: 0, y: 1 } },
   { id: "throttle_down", fn: "throttle", dir: -1, detect: false, say: "And all the way back down.", hand: "left", ghost: { x: 0, y: -1 } },
-  { id: "yaw_right", fn: "yaw", dir: 1, detect: true, say: "Left stick — push it right.", hand: "left", ghost: { x: 1, y: -1 } },
+  { id: "yaw_right", fn: "yaw", dir: 1, detect: true, say: "Left stick, push it right.", hand: "left", ghost: { x: 1, y: -1 } },
   { id: "yaw_left", fn: "yaw", dir: -1, detect: false, say: "Now push it left.", hand: "left", ghost: { x: -1, y: -1 } },
-  { id: "roll_right", fn: "roll", dir: 1, detect: true, say: "Right stick — push it right.", hand: "right", ghost: { x: 1, y: 0 } },
+  { id: "roll_right", fn: "roll", dir: 1, detect: true, say: "Right stick, push it right.", hand: "right", ghost: { x: 1, y: 0 } },
   { id: "roll_left", fn: "roll", dir: -1, detect: false, say: "Now left.", hand: "right", ghost: { x: -1, y: 0 } },
   { id: "pitch_up", fn: "pitch", dir: 1, detect: true, say: "Right stick up!", hand: "right", ghost: { x: 0, y: 1 } },
   { id: "pitch_down", fn: "pitch", dir: -1, detect: false, say: "And down.", hand: "right", ghost: { x: 0, y: -1 } },
@@ -241,7 +241,7 @@ export function RadioStep() {
         </group>
         <group position={[TX_POSITION[0] + 1.45, -0.45, 0.35]} rotation={[0, -0.5, 0]}>
           <Receiver linked={linked} />
-          {phase === "power" && <PulseRing radius={0.4} color={linked ? palette.triangle : palette.circle} speed={0.8} position={[0, -0.08, 0]} />}
+          {phase === "power" && <PulseRing radius={0.4} color={linked ? palette.triangle : palette.danger} speed={0.8} position={[0, -0.08, 0]} />}
         </group>
       </SceneTunnel.In>
 

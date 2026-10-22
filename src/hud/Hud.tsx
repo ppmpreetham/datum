@@ -96,7 +96,7 @@ export function StatusChip() {
   const voice = useApp((s) => s.voice);
   const firmware = vehicle.firmware === "px4" ? "PX4" : vehicle.firmware === "ardu_pilot" ? "ArduPilot" : null;
   const color =
-    vehicle.phase === "connected" ? palette.triangle : vehicle.phase === "connecting" ? palette.gold : palette.circle;
+    vehicle.phase === "connected" ? palette.triangle : vehicle.phase === "connecting" ? palette.gold : palette.danger;
   return (
     <div className="status">
       <div className="status__chip">

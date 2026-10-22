@@ -90,7 +90,7 @@ export function EscBench({ state, plugged, propOn, ledColor, ledBlink = false, b
           [0.62, -0.06, -0.04 + i * 0.04],
         ]),
       })),
-      power: [palette.circle, palette.ink].map((color, i) => ({
+      power: [palette.danger, palette.ink].map((color, i) => ({
         color,
         geometry: wire(
           [
@@ -101,7 +101,7 @@ export function EscBench({ state, plugged, propOn, ledColor, ledBlink = false, b
           0.024,
         ),
       })),
-      battery: [palette.circle, palette.ink].map((color, i) => ({
+      battery: [palette.danger, palette.ink].map((color, i) => ({
         color,
         geometry: wire(
           [
@@ -145,7 +145,7 @@ export function EscBench({ state, plugged, propOn, ledColor, ledBlink = false, b
     if (gauge.current) {
       const fill = Math.max(0, Math.min(1, throttle));
       gaugeGeometry.setDrawRange(0, Math.round(fill * GAUGE_SEGMENTS) * 6);
-      gaugeMaterial.color.copy(throttleColor.set(palette.triangle).lerp(new THREE.Color(palette.circle), fill));
+      gaugeMaterial.color.copy(throttleColor.set(palette.triangle).lerp(new THREE.Color(palette.gold), fill));
     }
     if (led.current) {
       led.current.emissive.set(ledColor);

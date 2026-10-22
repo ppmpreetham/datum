@@ -751,6 +751,36 @@ fn radio_range_valid(minimum_us: u16, maximum_us: u16) -> bool {
     maximum_us.saturating_sub(minimum_us) >= 400
 }
 
+fn selected_radio_channels(
+    requested: Option<&[u8]>,
+    live: &[RadioChannelStatus],
+) -> Result<BTreeSet<u8>, String> {
+    let live_channels = live
+        .iter()
+        .map(|item| item.channel)
+        .collect::<BTreeSet<_>>();
+    let Some(requested) = requested else {
+        return Ok(live_channels);
+    };
+    if requested.is_empty() {
+        return Err("INVALID_REQUEST: select at least one radio channel.".into());
+    }
+    let selected = requested.iter().copied().collect::<BTreeSet<_>>();
+    if selected.iter().any(|channel| !(1..=18).contains(channel)) {
+        return Err("INVALID_REQUEST: radio channels must be between 1 and 18.".into());
+    }
+    let missing = selected
+        .difference(&live_channels)
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!(
+            "NO_RC_SIGNAL: channels {missing:?} have no live telemetry."
+        ));
+    }
+    Ok(selected)
+}
+
 /// Channels that never moved during capture are unused outputs (for example
 /// iBUS channels 7-14 on a six-channel transmitter). They are left untouched
 /// rather than blocking the save.
@@ -4237,5 +4267,4 @@ mod tests {
         assert_eq!(position_name(6.0), Some("upside_down"));
         assert_eq!(position_name(9.0), None);
     }
-}
 }

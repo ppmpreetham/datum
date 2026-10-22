@@ -11,7 +11,9 @@ export const palette = {
   glow: "#9ff4ff",
   cyan: "#3fd0ff",
   triangle: "#3ee6b0",
-  circle: "#ff5c7a",
+  circle: "#b48cff",
+  /** Reserved for genuinely bad states (errors, no signal, motion during gyro). */
+  danger: "#ff5c7a",
   cross: "#7fb2ff",
   square: "#ff8ad8",
   gold: "#ffd447",

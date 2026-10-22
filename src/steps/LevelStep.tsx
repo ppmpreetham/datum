@@ -1,7 +1,7 @@
 import { useFrame } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { SceneTunnel, showError, speak, useBackend, useCamera, useDrone } from "../app/state";
+import { SceneTunnel, app, showError, speak, useBackend, useCamera, useDrone } from "../app/state";
 import { ActionBar, PadButton, ProgressRing } from "../hud/Controls";
 import { attitude } from "../lib/attitude";
 import { sfx } from "../lib/sfx";
@@ -44,7 +44,7 @@ function BubbleLevel({ settled }: { settled: boolean }) {
     if (!bubble.current) return;
     const step = Math.min(dt, 0.05);
     const goal = bubbleOffset();
-    // Springy, slightly underdamped motion — it should feel like liquid.
+    // Springy, slightly underdamped motion: it should feel like liquid.
     velocity.current.x += ((goal.x - position.current.x) * 60 - velocity.current.x * 9) * step;
     velocity.current.y += ((goal.z - position.current.y) * 60 - velocity.current.y * 9) * step;
     position.current.addScaledVector(velocity.current, step);
@@ -110,6 +110,7 @@ export function LevelStep() {
   const [tilt, setTilt] = useState({ roll: 0, pitch: 0 });
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
+  const baseline = useRef<unknown>(null);
 
   useDrone({ pose: "live", visible: phase !== "orient" });
   useCamera([0.55, 1.5, 3.4], [0.55, 0.1, 0], 40, phase !== "orient");
@@ -137,7 +138,7 @@ export function LevelStep() {
   }, [phase, tooTilted, ready]);
 
   useEffect(() => {
-    if (phase !== "running" || !calibration) return;
+    if (phase !== "running" || !calibration || calibration === baseline.current) return;
     if (calibration.phase === "completed") {
       sfx.success();
       setPhase("done");
@@ -149,6 +150,7 @@ export function LevelStep() {
 
   const level = async () => {
     setBusy(true);
+    baseline.current = app.get().vehicle.calibration;
     try {
       await backend.startCalibration("level");
       speak("Adjusting trims…");

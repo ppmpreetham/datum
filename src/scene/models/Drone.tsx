@@ -55,7 +55,10 @@ const ghostFragment = /* glsl */ `
   varying vec3 vNormal;
   varying vec3 vView;
   void main() {
-    float rim = pow(1.0 - abs(dot(vNormal, vView)), 1.8);
+    // Interpolated normals can push |dot| past 1; pow() of a negative is NaN on real GPUs,
+    // and bloom then smears that NaN across the whole frame (black screen).
+    float facing = abs(dot(normalize(vNormal), normalize(vView)));
+    float rim = pow(clamp(1.0 - facing, 0.0, 1.0), 1.8);
     float scan = 0.85 + 0.15 * sin(gl_FragCoord.y * 0.35 - uTime * 4.0);
     gl_FragColor = vec4(uColor * (0.35 + rim * 1.6), (0.12 + rim * 0.9) * uOpacity * scan);
   }

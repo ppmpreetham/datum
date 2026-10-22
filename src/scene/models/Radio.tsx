@@ -330,7 +330,7 @@ export function Receiver({ linked, ...props }: JSX.IntrinsicElements["group"] & 
     if (!led.current) return;
     const on = linked || Math.floor(clock.elapsedTime * 4) % 2 === 0;
     led.current.emissiveIntensity = on ? 3 : 0.1;
-    led.current.emissive.set(linked ? palette.triangle : palette.circle);
+    led.current.emissive.set(linked ? palette.triangle : palette.danger);
   });
   const antennas = useMemo(
     () =>
@@ -357,7 +357,7 @@ export function Receiver({ linked, ...props }: JSX.IntrinsicElements["group"] & 
       ))}
       <mesh position={[0.12, 0.085, -0.1]}>
         <sphereGeometry args={[0.018, 16, 16]} />
-        <meshStandardMaterial ref={led} color="#330000" emissive={palette.circle} toneMapped={false} />
+        <meshStandardMaterial ref={led} color="#330000" emissive={palette.danger} toneMapped={false} />
       </mesh>
       {antennas.map((geometry, i) => (
         <group key={i}>

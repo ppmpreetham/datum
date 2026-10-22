@@ -103,7 +103,7 @@ export function ConnectStep() {
               : `${vehicle.firmware === "px4" ? "PX4" : "ArduPilot"} on ${vehicle.address}. Datum talks to it directly, so close QGroundControl's connection to this port first.`}
           </p>
         ) : backend.kind === "sim" ? (
-          <p className="hint">No drone needed — everything runs on a pretend ArduPilot quad.</p>
+          <p className="hint">No drone needed. Everything runs on a pretend ArduPilot quad.</p>
         ) : advanced ? (
           <>
             <p className="hint">A MAVLink address, e.g. SITL or a telemetry bridge.</p>

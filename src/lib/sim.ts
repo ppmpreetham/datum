@@ -168,7 +168,7 @@ export class SimBackend implements Backend {
       const still = attitude.angularSpeed < 0.25;
       this.stillFor = still ? this.stillFor + dt : 0;
       if (!still) {
-        this.progress({ ...calibration, phase: "in_progress", message: "Motion detected — hold still" });
+        this.progress({ ...calibration, phase: "in_progress", message: "Motion detected, hold still" });
       } else if (this.stillFor > 0.3) {
         const percent = Math.min(100, (calibration.percent ?? 0) + dt * 30);
         const done = percent >= 100;
@@ -192,7 +192,7 @@ export class SimBackend implements Backend {
       this.compassSession = {
         ...this.compassSession,
         status: done ? "completed" : "in_progress",
-        instruction: done ? "Calibration successful — reboot the vehicle" : "Rotate the vehicle",
+        instruction: done ? "Calibration successful. Reboot the vehicle" : "Rotate the vehicle",
         sensors: [
           {
             compass_id: 0,

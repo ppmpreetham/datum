@@ -29,7 +29,7 @@ export type CoverageHint = {
 
 /**
  * Tracks which directions of Earth's magnetic field the drone's body has
- * "seen" — exactly what an onboard compass calibration needs. Visually it's a
+ * "seen", exactly what an onboard compass calibration needs. Visually it's a
  * sphere that rolls under a fixed brush (the field direction).
  */
 export class SphereCoverage {

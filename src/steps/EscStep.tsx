@@ -94,7 +94,7 @@ export function EscStep() {
         if (cancelled) return;
         setCapabilities(caps);
         if (!caps.endpoint_calibration_required) {
-          speak(`${caps.protocol.toUpperCase()} is digital — no calibration needed! Let's test the motors.`, "good");
+          speak(`${caps.protocol.toUpperCase()} is digital, no calibration needed! Let's test the motors.`, "good");
         } else {
           speak("Your ESCs use PWM. Let's teach them the throttle range.");
         }
@@ -190,7 +190,7 @@ export function EscStep() {
       if (!result.accepted) throw new Error(result.message);
       sfx.whoosh();
       setSpinning(true);
-      speak(`Motor ${MOTOR_LABELS[motor]} — spinning ${ROTOR_DIRECTIONS[motor] > 0 ? "counter-clockwise" : "clockwise"}?`);
+      speak(`Motor ${MOTOR_LABELS[motor]}: spinning ${ROTOR_DIRECTIONS[motor] > 0 ? "counter-clockwise" : "clockwise"}?`);
       window.setTimeout(() => setSpinning(false), duration * 1000);
       markComplete("esc");
     } catch (error) {
@@ -206,7 +206,7 @@ export function EscStep() {
     setSimChannel(3, simRadioInputs[2] + dy * 500);
   };
 
-  const ledColor = plugged ? (status?.step_id === "power_and_confirm_tones" ? palette.gold : palette.triangle) : palette.circle;
+  const ledColor = plugged ? (status?.step_id === "power_and_confirm_tones" ? palette.gold : palette.triangle) : palette.danger;
 
   return (
     <>

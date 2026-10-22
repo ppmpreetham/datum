@@ -25,7 +25,7 @@ export const POSES: Record<
   right: { label: "Right side", say: "Now onto its right side.", roll: d(90), pitch: 0, gravity: new THREE.Vector3(0, 1, 0), color: palette.cross, icon: 90 },
   nose_down: { label: "Nose down", say: "Stand it on its nose.", roll: 0, pitch: d(-90), gravity: new THREE.Vector3(1, 0, 0), color: palette.square, icon: 90 },
   nose_up: { label: "Nose up", say: "Stand it on its tail, nose up.", roll: 0, pitch: d(90), gravity: new THREE.Vector3(-1, 0, 0), color: palette.gold, icon: -90 },
-  upside_down: { label: "Upside down", say: "Last one — flip it upside down!", roll: d(180), pitch: 0, gravity: new THREE.Vector3(0, 0, -1), color: palette.cyan, icon: 180 },
+  upside_down: { label: "Upside down", say: "Last one, flip it upside down!", roll: d(180), pitch: 0, gravity: new THREE.Vector3(0, 0, -1), color: palette.cyan, icon: 180 },
 };
 const ORDER: AccelPosition[] = ["level", "left", "right", "nose_down", "nose_up", "upside_down"];
 const MATCH = d(14);
@@ -242,7 +242,7 @@ export function AccelStep() {
   };
 
   if (phase === "orient") return <OrientationSetup sensorName="Accelerometer" onConfirm={() => setPhase("ready")} />;
-  if (phase === "done") return <DoneCard step="accel" title="All six sides — nailed it!" onRedo={() => setPhase("ready")} />;
+  if (phase === "done") return <DoneCard step="accel" title="All six sides, nailed it!" onRedo={() => setPhase("ready")} />;
   if (phase === "failed") return <FailCard message={failure} onRetry={() => setPhase("ready")} />;
 
   const color = pose ? POSES[pose].color : palette.glow;
@@ -263,7 +263,7 @@ export function AccelStep() {
       {phase === "ready" ? (
         <Panel className="panel--left">
           <Title kicker="Accelerometer">The six-side pose</Title>
-          <p className="hint">Props off, on a flat table. I'll show a ghost — slide your drone into it.</p>
+          <p className="hint">Props off, on a flat table. I'll show a ghost. Slide your drone into it.</p>
           <PoseTiles done={[]} current={null} />
         </Panel>
       ) : (

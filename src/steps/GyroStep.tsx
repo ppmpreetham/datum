@@ -2,7 +2,7 @@ import { useFrame } from "@react-three/fiber";
 import clsx from "clsx";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
-import { SceneTunnel, showError, speak, useBackend, useCamera, useDrone } from "../app/state";
+import { SceneTunnel, app, showError, speak, useBackend, useCamera, useDrone } from "../app/state";
 import { ActionBar, PadButton, ProgressRing } from "../hud/Controls";
 import { attitude } from "../lib/attitude";
 import { sfx } from "../lib/sfx";
@@ -39,7 +39,7 @@ function StillnessRing({ progress }: { progress: number | null }) {
     shown.current = THREE.MathUtils.damp(shown.current, goal, 4, dt);
     geometry.setDrawRange(0, Math.round(shown.current * RING_SEGMENTS) * 6);
     if (progress === null) fill.current.rotation.z = clock.elapsedTime * 2;
-    (fill.current.material as THREE.MeshBasicMaterial).color.set(moving ? palette.circle : palette.triangle);
+    (fill.current.material as THREE.MeshBasicMaterial).color.set(moving ? palette.danger : palette.triangle);
   });
   return (
     <group ref={group} position={[0, -0.25, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -62,6 +62,10 @@ export function GyroStep() {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState("");
   const started = useRef(false);
+  // Auto-start only once per settle; after a failure, wait for the button.
+  const autoTried = useRef(false);
+  // Vehicle status from before we started; a leftover result must not end this run.
+  const baseline = useRef<unknown>(null);
 
   useDrone({ pose: phase === "orient" ? "level" : "live", visible: phase !== "orient" });
   useCamera(phase === "wake" ? [1.5, 1.9, 2.9] : [0.4, 1.1, 3.0], [0, -0.1, 0], 40, phase !== "orient");
@@ -109,6 +113,7 @@ export function GyroStep() {
     if (started.current) return;
     started.current = true;
     setBusy(true);
+    baseline.current = app.get().vehicle.calibration;
     try {
       await backend.startCalibration("gyro");
       setPhase("running");
@@ -122,11 +127,14 @@ export function GyroStep() {
   };
 
   useEffect(() => {
-    if (phase === "settle" && held > 1.5) void start();
+    if (phase === "settle" && held > 1.5 && !autoTried.current) {
+      autoTried.current = true;
+      void start();
+    }
   }, [held, phase]);
 
   useEffect(() => {
-    if (phase !== "running" || !calibration) return;
+    if (phase !== "running" || !calibration || calibration === baseline.current) return;
     if (calibration.phase === "completed") setPhase("done");
     else if (["failed", "stopped", "unknown"].includes(calibration.phase)) {
       setFailure(calibration.message);
@@ -136,13 +144,14 @@ export function GyroStep() {
 
   const restart = () => {
     started.current = false;
+    autoTried.current = false;
     setReached([]);
     setPhase("wake");
   };
 
   if (phase === "orient") return <OrientationSetup sensorName="Gyroscope" onConfirm={() => setPhase("wake")} />;
   if (phase === "done") return <DoneCard step="gyro" title="Gyro is wide awake!" onRedo={restart} />;
-  if (phase === "failed") return <FailCard message={failure} onRetry={() => (started.current = false, setPhase("settle"))} />;
+  if (phase === "failed") return <FailCard message={failure} onRetry={() => ((started.current = false), (autoTried.current = false), setPhase("settle"))} />;
 
   const running = phase === "running";
   const percent = calibration?.percent ?? null;
@@ -185,7 +194,7 @@ export function GyroStep() {
         )}
         {phase === "settle" && (
           <PadButton glyph="cross" primary busy={busy} onPress={start}>
-            It's still — go!
+            It's still, go!
           </PadButton>
         )}
         {running && ACTIVE_PHASES.includes(calibration?.phase ?? "") && (
