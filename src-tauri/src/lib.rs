@@ -1,5 +1,8 @@
 mod calibration;
+mod endpoint_manifest;
+mod logging;
 mod server;
+use tauri::Manager;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -42,24 +45,35 @@ pub fn run() {
             calibration::finish_radio_calibration,
             calibration::cancel_radio_calibration,
             calibration::esc_capabilities,
+            calibration::esc_protocol_options,
             calibration::esc_steps,
             calibration::start_esc_calibration,
             calibration::advance_esc_calibration,
             calibration::esc_calibration_status,
             calibration::cancel_esc_calibration,
             calibration::flight_mode_configuration,
+            calibration::flight_mode_options,
             calibration::set_flight_mode_configuration,
             calibration::failsafe_configuration,
+            calibration::failsafe_options,
             calibration::set_failsafe_configuration,
             calibration::battery_configuration,
+            calibration::battery_monitor_options,
             calibration::set_battery_configuration,
             calibration::calibrate_battery_voltage,
             calibration::run_motor_test,
+            calibration::radio_calibration_options,
             calibration::continue_calibration,
             calibration::stop_calibration
         ])
-        .setup(move |_app| {
-            server::start();
+        .setup(move |app| {
+            let log_dir = app
+                .path()
+                .app_log_dir()
+                .map_err(|error| format!("Could not resolve application log directory: {error}"))?;
+            let log_path = logging::init(&log_dir)?;
+            log::info!(target: "datum::startup", "backend starting log_path={}", log_path.display());
+            server::start()?;
             Ok(())
         })
         .run(tauri::generate_context!())

@@ -8,6 +8,9 @@ Commands: `esc_capabilities`, `esc_steps`, `start_esc_calibration`,
 `advance_esc_calibration`, `esc_calibration_status`, and
 `cancel_esc_calibration`.
 
+`esc_protocol_options` returns the known `MOT_PWM_TYPE` values and whether
+traditional endpoint calibration applies to each protocol.
+
 Starting requires `{ "request": { "propellers_removed": true } }`. Each step
 is advanced with a session ID, the current step ID, and action
 `confirm_completed`. Completion remains manually confirmed because ESC tones

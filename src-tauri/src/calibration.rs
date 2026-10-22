@@ -2,7 +2,7 @@ use mavlink::{ardupilotmega as mav, MavConnection, MavHeader};
 use serde::{Deserialize, Serialize};
 use serialport::{SerialPortInfo, SerialPortType};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{mpsc, Mutex},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -680,6 +680,7 @@ struct Session {
     radio_active: bool,
     radio_capture_min_max: bool,
     radio_capture_trim: bool,
+    radio_selected_channels: Option<BTreeSet<u8>>,
     radio_channels: Vec<RadioChannelStatus>,
     esc_session_id: Option<String>,
     esc_step: usize,
@@ -718,6 +719,8 @@ pub struct RadioStartRequest {
     pub capture_min_max: bool,
     #[serde(default = "default_true")]
     pub capture_trim: bool,
+    #[serde(default)]
+    pub channels: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -822,6 +825,195 @@ pub struct FlightModeConfiguration {
     pub active_mode: Option<u32>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct NumericOption {
+    pub value: u8,
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FlightModeOptions {
+    pub mode_channel_min: u8,
+    pub mode_channel_max: u8,
+    pub modes: Vec<NumericOption>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FailsafeOptions {
+    pub throttle: Vec<NumericOption>,
+    pub battery_low: Vec<NumericOption>,
+    pub battery_critical: Vec<NumericOption>,
+    pub gcs: Vec<NumericOption>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ParameterRange {
+    pub id: &'static str,
+    pub unit: &'static str,
+    pub minimum: f32,
+    pub maximum: f32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct BatteryMonitorOptions {
+    pub monitor_types: Vec<NumericOption>,
+    pub ranges: Vec<ParameterRange>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct RadioCalibrationOptions {
+    pub live_channels: Vec<u8>,
+    pub minimum_travel_us: u16,
+    pub channel_min: u8,
+    pub channel_max: u8,
+    pub trim_capture: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EscProtocolOption {
+    pub value: u8,
+    pub protocol: &'static str,
+    pub endpoint_calibration_required: bool,
+}
+
+fn option(value: u8, id: &'static str, label: &'static str) -> NumericOption {
+    NumericOption {
+        value,
+        id,
+        label,
+        description: label,
+    }
+}
+
+#[tauri::command]
+pub fn flight_mode_options() -> FlightModeOptions {
+    FlightModeOptions {
+        mode_channel_min: 1,
+        mode_channel_max: 16,
+        modes: vec![
+            option(0, "stabilize", "Stabilize"),
+            option(1, "acro", "Acro"),
+            option(2, "alt_hold", "Altitude Hold"),
+            option(3, "auto", "Auto"),
+            option(4, "guided", "Guided"),
+            option(5, "loiter", "Loiter"),
+            option(6, "rtl", "Return to Launch"),
+            option(7, "circle", "Circle"),
+            option(9, "land", "Land"),
+            option(11, "drift", "Drift"),
+            option(13, "sport", "Sport"),
+            option(14, "flip", "Flip"),
+            option(15, "autotune", "AutoTune"),
+            option(16, "poshold", "Position Hold"),
+            option(17, "brake", "Brake"),
+            option(18, "throw", "Throw"),
+            option(19, "avoid_adsb", "Avoid ADS-B"),
+            option(20, "guided_nogps", "Guided No GPS"),
+            option(21, "smart_rtl", "Smart RTL"),
+            option(22, "flowhold", "Flow Hold"),
+            option(23, "follow", "Follow"),
+            option(24, "zigzag", "ZigZag"),
+            option(25, "systemid", "System ID"),
+            option(26, "autorotate", "Auto Rotate"),
+            option(27, "auto_rtl", "Auto RTL"),
+        ],
+    }
+}
+
+#[tauri::command]
+pub fn failsafe_options() -> FailsafeOptions {
+    let throttle = (0..=7)
+        .map(|value| option(value, "firmware_value", "ArduPilot throttle action"))
+        .collect();
+    let battery = (0..=5)
+        .map(|value| option(value, "firmware_value", "ArduPilot battery action"))
+        .collect::<Vec<_>>();
+    let gcs = (0..=7)
+        .map(|value| option(value, "firmware_value", "ArduPilot GCS action"))
+        .collect();
+    FailsafeOptions {
+        throttle,
+        battery_low: battery.clone(),
+        battery_critical: battery,
+        gcs,
+    }
+}
+
+#[tauri::command]
+pub fn battery_monitor_options() -> BatteryMonitorOptions {
+    BatteryMonitorOptions {
+        monitor_types: vec![
+            option(0, "disabled", "Disabled"),
+            option(3, "analog_voltage", "Analog voltage"),
+            option(4, "analog_voltage_current", "Analog voltage and current"),
+            option(9, "esc", "ESC telemetry"),
+        ],
+        ranges: vec![
+            ParameterRange {
+                id: "capacity_mah",
+                unit: "mAh",
+                minimum: 1.0,
+                maximum: 100_000.0,
+            },
+            ParameterRange {
+                id: "voltage_multiplier",
+                unit: "ratio",
+                minimum: 0.001,
+                maximum: 100.0,
+            },
+            ParameterRange {
+                id: "amps_per_volt",
+                unit: "A/V",
+                minimum: 0.0,
+                maximum: 10_000.0,
+            },
+            ParameterRange {
+                id: "measured_voltage",
+                unit: "V",
+                minimum: 1.0,
+                maximum: 100.0,
+            },
+        ],
+    }
+}
+
+#[tauri::command]
+pub fn radio_calibration_options(
+    service: State<'_, CalibrationService>,
+) -> RadioCalibrationOptions {
+    let live_channels = service
+        .0
+        .lock()
+        .unwrap()
+        .radio_channels
+        .iter()
+        .map(|channel| channel.channel)
+        .collect();
+    RadioCalibrationOptions {
+        live_channels,
+        minimum_travel_us: 400,
+        channel_min: 1,
+        channel_max: 18,
+        trim_capture: "Captured from the live value when calibration starts.",
+    }
+}
+
+#[tauri::command]
+pub fn esc_protocol_options() -> Vec<EscProtocolOption> {
+    (0..=7)
+        .map(|value| {
+            let (protocol, required) = esc_protocol(value);
+            EscProtocolOption {
+                value,
+                protocol,
+                endpoint_calibration_required: required,
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct FlightModeUpdate {
     pub mode_channel: u8,
@@ -920,6 +1112,29 @@ pub struct CompassCalibrationStatus {
     pub status: CalibrationPhase,
     pub instruction: String,
     pub sensors: Vec<CompassSensorStatus>,
+    pub guidance: Option<CompassGuidance>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CompassGuidance {
+    pub text: String,
+    pub source: &'static str,
+    pub progress_percent: u8,
+}
+
+fn compass_guidance(progress: u8) -> CompassGuidance {
+    let text = match progress {
+        0..=19 => "Hold the vehicle level and slowly rotate through a full heading circle.",
+        20..=39 => "Tilt the nose upward and continue slow rotations through different headings.",
+        40..=59 => "Tilt the nose downward and rotate slowly to expose new orientations.",
+        60..=79 => "Roll onto each side while continuing smooth rotations.",
+        _ => "Turn the vehicle upside down and sweep any orientations not yet covered.",
+    };
+    CompassGuidance {
+        text: text.into(),
+        source: "backend_heuristic",
+        progress_percent: progress,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -953,6 +1168,7 @@ fn compass_status(session: &Session) -> Result<CompassCalibrationStatus, String>
         status: progress.phase.clone(),
         instruction: progress.message.clone(),
         sensors: session.compass_sensors.clone(),
+        guidance: progress.percent.map(compass_guidance),
     })
 }
 
@@ -1087,14 +1303,22 @@ fn change(
             radio_status(&session),
         )
     };
-    let _ = app.emit("datum://vehicle", snapshot);
+    if let Err(error) = app.emit("datum://vehicle", snapshot) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     if let Some(accelerometer) = accelerometer {
-        let _ = app.emit("datum://accelerometer", accelerometer);
+        if let Err(error) = app.emit("datum://accelerometer", accelerometer) {
+            log::warn!(target: "datum::events", "emit failed event=accelerometer error={error}");
+        }
     }
     if let Some(compass) = compass {
-        let _ = app.emit("datum://compass", compass);
+        if let Err(error) = app.emit("datum://compass", compass) {
+            log::warn!(target: "datum::events", "emit failed event=compass error={error}");
+        }
     }
-    let _ = app.emit("datum://radio", radio);
+    if let Err(error) = app.emit("datum://radio", radio) {
+        log::warn!(target: "datum::events", "emit failed event=radio error={error}");
+    }
 }
 
 #[tauri::command]
@@ -1200,6 +1424,7 @@ pub fn connect_vehicle(
     service: State<'_, CalibrationService>,
 ) -> Result<VehicleStatus, String> {
     validate_address(&address)?;
+    log::info!(target: "datum::connection", "connect requested address={address}");
     let (sender, receiver) = mpsc::channel();
     let (generation, snapshot) = {
         let mut session = service.0.lock().unwrap();
@@ -1216,7 +1441,9 @@ pub fn connect_vehicle(
         session.sender = Some(sender);
         (session.generation, session.status.clone())
     };
-    let _ = app.emit("datum://vehicle", snapshot.clone());
+    if let Err(error) = app.emit("datum://vehicle", snapshot.clone()) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     thread::spawn(move || run_vehicle(app, generation, address, receiver));
     Ok(snapshot)
 }
@@ -1242,6 +1469,7 @@ pub fn connect_serial_vehicle(
 
 #[tauri::command]
 pub fn disconnect_vehicle(app: AppHandle, service: State<'_, CalibrationService>) -> VehicleStatus {
+    log::info!(target: "datum::connection", "disconnect requested");
     let snapshot = {
         let mut session = service.0.lock().unwrap();
         if let Some(sender) = session.sender.take() {
@@ -1251,7 +1479,9 @@ pub fn disconnect_vehicle(app: AppHandle, service: State<'_, CalibrationService>
         session.status = VehicleStatus::default();
         session.status.clone()
     };
-    let _ = app.emit("datum://vehicle", snapshot.clone());
+    if let Err(error) = app.emit("datum://vehicle", snapshot.clone()) {
+        log::warn!(target: "datum::events", "emit failed event=vehicle error={error}");
+    }
     snapshot
 }
 
@@ -1267,6 +1497,7 @@ fn start_calibration_inner(
     kind: CalibrationKind,
     service: &CalibrationService,
 ) -> Result<(), String> {
+    log::info!(target: "datum::calibration", "start requested kind={kind:?}");
     let mut session = service.0.lock().unwrap();
     let firmware = session
         .status
@@ -1286,7 +1517,6 @@ fn start_calibration_inner(
                 | CalibrationPhase::InProgress
                 | CalibrationPhase::AwaitingUser
                 | CalibrationPhase::Stopping
-                | CalibrationPhase::Unknown
         ) {
             return Err("Finish or stop the current calibration before starting another.".into());
         }
@@ -1609,6 +1839,11 @@ pub fn start_radio_calibration(
     session.radio_active = true;
     session.radio_capture_min_max = request.capture_min_max;
     session.radio_capture_trim = request.capture_trim;
+    session.radio_selected_channels = request
+        .channels
+        .as_deref()
+        .map(|channels| selected_radio_channels(Some(channels), &session.radio_channels))
+        .transpose()?;
     for channel in &mut session.radio_channels {
         channel.minimum_us = channel.value_us;
         channel.maximum_us = channel.value_us;
@@ -1638,6 +1873,22 @@ pub fn finish_radio_calibration(
         }
         if session.radio_channels.is_empty() {
             return Err("NO_RC_SIGNAL: no RC_CHANNELS telemetry has been received.".into());
+        }
+        let selected = session.radio_selected_channels.clone().unwrap_or_else(|| {
+            session
+                .radio_channels
+                .iter()
+                .filter(|channel| {
+                    !session.radio_capture_min_max
+                        || radio_range_valid(channel.minimum_us, channel.maximum_us)
+                })
+                .map(|channel| channel.channel)
+                .collect()
+        });
+        if selected.is_empty() {
+            return Err(
+                "INVALID_RC_RANGE: no selected channel completed the required travel.".into(),
+            );
         }
         if session.radio_capture_min_max {
             let invalid = session
@@ -2107,6 +2358,7 @@ fn run_vehicle(
     let connection = match mavlink::connect::<mav::MavMessage>(&address) {
         Ok(connection) => connection,
         Err(error) => {
+            log::error!(target: "datum::connection", "open failed address={address} error={error}");
             change(&app, &service, generation, |s| {
                 s.status.phase = Phase::Error;
                 s.status.message = format!("Could not open vehicle connection: {error}");
@@ -2115,6 +2367,7 @@ fn run_vehicle(
             return;
         }
     };
+    log::info!(target: "datum::connection", "transport opened generation={generation} address={address}");
     let mut last_heartbeat: Option<Instant> = None;
     let started = Instant::now();
     let mut sequence = 0u8;
@@ -3762,6 +4015,62 @@ mod tests {
     }
 
     #[test]
+    fn radio_selection_ignores_unselected_fixed_channels() {
+        let live = vec![
+            RadioChannelStatus {
+                channel: 1,
+                value_us: 1500,
+                minimum_us: 1000,
+                maximum_us: 2000,
+                trim_us: 1500,
+                range_valid: true,
+            },
+            RadioChannelStatus {
+                channel: 9,
+                value_us: 1500,
+                minimum_us: 1500,
+                maximum_us: 1500,
+                trim_us: 1500,
+                range_valid: false,
+            },
+        ];
+        let selected = selected_radio_channels(Some(&[1]), &live).unwrap();
+        assert_eq!(selected.into_iter().collect::<Vec<_>>(), vec![1]);
+        assert!(selected_radio_channels(Some(&[9]), &live).is_ok());
+        assert!(selected_radio_channels(Some(&[19]), &live).is_err());
+    }
+
+    #[test]
+    fn compass_guidance_is_dynamic_and_explicitly_heuristic() {
+        let early = compass_guidance(10);
+        let middle = compass_guidance(55);
+        assert_ne!(early.text, middle.text);
+        assert_eq!(early.source, "backend_heuristic");
+        assert_eq!(middle.progress_percent, 55);
+    }
+
+    #[test]
+    fn configuration_metadata_matches_validation_domains() {
+        let modes = flight_mode_options();
+        assert_eq!(modes.mode_channel_min, 1);
+        assert_eq!(modes.mode_channel_max, 16);
+        assert!(modes
+            .modes
+            .iter()
+            .any(|mode| mode.value == 6 && mode.id == "rtl"));
+        let failsafes = failsafe_options();
+        assert_eq!(failsafes.throttle.len(), 8);
+        assert_eq!(failsafes.battery_low.len(), 6);
+        assert!(esc_protocol_options()
+            .iter()
+            .any(|item| item.protocol == "dshot600" && !item.endpoint_calibration_required));
+        assert!(battery_monitor_options()
+            .ranges
+            .iter()
+            .any(|item| item.id == "measured_voltage" && item.maximum == 100.0));
+    }
+
+    #[test]
     fn ardupilot_frame_options_keep_firmware_values_distinct() {
         let options = ardupilot_frame_options();
         let quad = options
@@ -3928,4 +4237,5 @@ mod tests {
         assert_eq!(position_name(6.0), Some("upside_down"));
         assert_eq!(position_name(9.0), None);
     }
+}
 }

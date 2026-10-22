@@ -1,292 +1,341 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "schemaVersion": 1,
   "title": "Datum backend endpoint contract",
-  "version": "0.3.0",
   "runtime": {
     "desktopFramework": "Tauri 2",
-    "flightStacks": ["ArduPilot", "PX4"],
-    "operatingSystems": ["Linux", "Windows"],
-    "connectionModel": "one serial-connected flight controller at a time",
-    "mavlinkDialect": "ardupilotmega (includes common messages used by PX4)",
-    "safety": "Calibration commands never arm or run motors. Remove propellers before hardware setup."
-  },
-  "callingConvention": {
-    "tauri": "import { invoke } from '@tauri-apps/api/core'; then await invoke(command, arguments)",
-    "argumentNaming": "JavaScript argument keys use camelCase. Rust responses are serialized as camelCase.",
-    "errors": "A Rust Result::Err rejects the invoke Promise with its string message."
+    "operatingSystem": "Windows",
+    "connectionModel": "one managed MAVLink connection",
+    "websocket": "ws://127.0.0.1:8000/ws/gyro"
   },
   "endpoints": [
     {
-      "id": "get_backend_info",
-      "transport": "tauri-command",
-      "frontendCall": "await invoke('get_backend_info')",
-      "arguments": {},
-      "returns": "BackendInfo: version, OS, CPU architecture, flight stacks, transports, and motorCommandsEnabled=false"
-    },
-    {
-      "id": "get_backend_manifest",
-      "transport": "tauri-command",
-      "frontendCall": "await invoke('get_backend_manifest')",
-      "arguments": {},
-      "returns": "This complete endpoints.json document compiled into the running application."
-    },
-    {
       "id": "greet",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('greet', { name: 'Ada' })",
-      "arguments": { "name": "required string" },
-      "returns": "string",
-      "notes": "Template diagnostic command; it does not communicate with hardware."
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "vehicle_status",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
       "id": "list_serial_ports",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('list_serial_ports')",
-      "arguments": {},
-      "returns": "SerialPortSummary[]",
-      "responseFields": {
-        "portName": "OS port such as /dev/ttyACM0 or COM3",
-        "portType": "human-readable USB, Bluetooth, PCI, or unknown type",
-        "isLikelyFlightController": "true for USB ports and common ACM/USB/COM names",
-        "usbVendorId": "number|null",
-        "usbProductId": "number|null",
-        "serialNumber": "string|null",
-        "manufacturer": "string|null",
-        "product": "string|null"
-      }
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "connect_drone",
+      "id": "calibration_options",
       "transport": "tauri-command",
-      "frontendCallLinux": "await invoke('connect_drone', { portName: '/dev/ttyACM0', baudRate: 115200 })",
-      "frontendCallWindows": "await invoke('connect_drone', { portName: 'COM3', baudRate: 115200 })",
-      "arguments": {
-        "portName": "required string from list_serial_ports",
-        "baudRate": "optional positive integer; default 115200"
-      },
-      "returns": "DroneStatus only after an ArduPilot or PX4 heartbeat verifies the link",
-      "timeout": "5 seconds waiting for a supported autopilot heartbeat",
-      "errors": [
-        "port cannot be opened",
-        "port is busy or permission is denied",
-        "no ArduPilot/PX4 heartbeat before timeout",
-        "another connection is active"
-      ]
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "auto_connect_drone",
+      "id": "frame_options",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('auto_connect_drone', { baudRates: [115200, 57600] })",
-      "arguments": {
-        "baudRates": "optional positive integer[]; default [115200, 57600]"
-      },
-      "returns": "AutoConnectResult with selected portName, baudRate, verified DroneStatus, and attempted combinations",
-      "behavior": "Tries likely USB/ACM/USB/COM flight-controller ports. It succeeds only after receiving an ArduPilot or PX4 heartbeat.",
-      "notes": "Manual connect remains available for unusual serial adapters or baud rates."
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "disconnect_drone",
+      "id": "current_frame",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('disconnect_drone')",
-      "arguments": {},
-      "returns": "DroneStatus with connectionPhase=disconnected and connected=false"
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "get_drone_status",
+      "id": "set_frame",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_drone_status')",
-      "arguments": {},
-      "returns": "DroneStatus",
-      "responseFields": {
-        "connected": "true only while a supported autopilot heartbeat is current",
-        "connectionPhase": "disconnected|connecting|ready|heartbeatLost|error",
-        "flightStack": "arduPilot|px4|generic|unknown|null",
-        "autopilotCode": "MAV_AUTOPILOT number|null",
-        "systemId": "MAVLink target system|null",
-        "componentId": "MAVLink target component|null",
-        "lastHeartbeatMs": "Unix milliseconds|null",
-        "lastError": "string|null"
-      }
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
     },
     {
-      "id": "request_hardware_telemetry",
+      "id": "connect_vehicle",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('request_hardware_telemetry')",
-      "arguments": {},
-      "preconditions": ["get_drone_status.connectionPhase must be ready"],
-      "returns": "Receipts for MAV_CMD_SET_MESSAGE_INTERVAL requests",
-      "requests": [
-        "SYS_STATUS at 1 Hz",
-        "GPS_RAW_INT at 1 Hz",
-        "SCALED_IMU at 5 Hz",
-        "ATTITUDE at 20 Hz"
-      ]
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "get_hardware_telemetry",
+      "id": "connect_serial_vehicle",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_hardware_telemetry')",
-      "arguments": {},
-      "returns": "Latest sensorHealth, imu, attitude, gps, battery and lastMessageMs values; fields are null until received"
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "get_calibration_capabilities",
+      "id": "disconnect_vehicle",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_calibration_capabilities')",
-      "arguments": {},
-      "returns": "Feature flags compiled from calibration_config.yaml, supported stacks, and safety flags"
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "start_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
     },
     {
       "id": "start_accelerometer_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('start_accelerometer_calibration')",
-      "arguments": {},
-      "preconditions": ["connected ArduPilot/PX4", "accelerometer flag enabled", "no active calibration", "propellers removed"],
-      "returns": "CalibrationStart with firmware-specific nextStep",
-      "firmwareBehavior": {
-        "ArduPilot": "starts MAV_CMD_PREFLIGHT_CALIBRATION, receives MAV_CMD_ACCELCAL_VEHICLE_POS prompts, and requires confirm_accelerometer_orientation",
-        "PX4": "starts MAV_CMD_PREFLIGHT_CALIBRATION and detects stable orientations automatically from PX4 prompts"
-      }
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
     },
     {
-      "id": "confirm_accelerometer_orientation",
+      "id": "accelerometer_calibration_step",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('confirm_accelerometer_orientation', { position: 'level' })",
-      "arguments": { "position": "level|left|right|nose_down|nose_up|back" },
-      "preconditions": ["ArduPilot", "active accelerometer calibration", "vehicle is motionless in the prompted orientation"],
-      "returns": "MavlinkCommandReceipt for MAV_CMD_ACCELCAL_VEHICLE_POS",
-      "errors": ["PX4 does not use this confirmation endpoint", "invalid position"]
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": true
     },
     {
-      "id": "start_gyroscope_calibration",
+      "id": "accelerometer_calibration_status",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('start_gyroscope_calibration')",
-      "arguments": {},
-      "preconditions": ["connected ArduPilot/PX4", "vehicle completely still", "propellers removed"],
-      "returns": "CalibrationStart",
-      "completion": "Tracks acknowledgements/status text; also detects the ArduPilot gyro unhealthy-to-healthy calibration cycle."
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "cancel_accelerometer_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "compass_sensors",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
       "id": "start_compass_calibration",
       "transport": "tauri-command",
-      "frontendCallArduPilot": "await invoke('start_compass_calibration', { options: { compassMask: 0, retryOnFailure: false, autosave: true, autoReboot: false } })",
-      "frontendCallPX4": "await invoke('start_compass_calibration')",
-      "arguments": {
-        "options": "optional ArduPilot-only CompassCalibrationOptions; omit for PX4",
-        "options.compassMask": "0..255 bitmask; 0 means every enabled compass; default 0",
-        "options.retryOnFailure": "boolean; default false",
-        "options.autosave": "boolean; default true",
-        "options.autoReboot": "boolean; default false"
-      },
-      "preconditions": ["connected ArduPilot/PX4", "away from magnetic interference", "propellers removed"],
-      "returns": "CalibrationStart",
-      "firmwareBehavior": {
-        "ArduPilot": "uses MAV_CMD_DO_START_MAG_CAL with retry and autosave; tracks MAG_CAL_PROGRESS and MAG_CAL_REPORT",
-        "PX4": "uses MAV_CMD_PREFLIGHT_CALIBRATION and tracks COMMAND_ACK/STATUSTEXT"
-      }
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
+    },
+    {
+      "id": "compass_calibration_status",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
       "id": "accept_compass_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('accept_compass_calibration')",
-      "arguments": {},
-      "preconditions": ["ArduPilot only"],
-      "returns": "MavlinkCommandReceipt for MAV_CMD_DO_ACCEPT_MAG_CAL",
-      "notes": "The default ArduPilot start requests autosave, so this is mainly available for explicit/manual workflows."
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
       "id": "cancel_compass_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('cancel_compass_calibration')",
-      "arguments": {},
-      "preconditions": ["ArduPilot only"],
-      "returns": "MavlinkCommandReceipt for MAV_CMD_DO_CANCEL_MAG_CAL"
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "start_radio_controller_calibration",
+      "id": "retry_compass_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('start_radio_controller_calibration')",
-      "arguments": {},
-      "preconditions": ["connected ArduPilot/PX4", "transmitter and receiver powered", "propellers removed"],
-      "returns": "CalibrationStart",
-      "notes": "Some firmware versions require parameter-based RC calibration and will return MAV_RESULT_UNSUPPORTED; the session reports that rejection instead of claiming success."
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "set_level_horizon",
+      "id": "radio_channels",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('set_level_horizon')",
-      "arguments": {},
-      "preconditions": ["connected ArduPilot/PX4", "vehicle motionless on a verified level surface", "propellers removed"],
-      "returns": "CalibrationStart for the level-horizon form of MAV_CMD_PREFLIGHT_CALIBRATION"
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "get_current_calibration",
+      "id": "start_radio_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_current_calibration')",
-      "arguments": {},
-      "returns": "CalibrationSession|null",
-      "responseFields": {
-        "state": "commandSent|inProgress|awaitingUserAction|completed|failed|cancelled",
-        "progressPercent": "0..100|null",
-        "instruction": "current user-facing firmware prompt or backend instruction",
-        "error": "rejection/failure|null",
-        "compassMask": "ArduPilot bitmask of compasses being calibrated|null",
-        "compassResults": "ArduPilot MAG_CAL_REPORT results including successful, fitness, and autosaved"
-      }
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
     },
     {
-      "id": "get_calibration_progress",
+      "id": "radio_calibration_status",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_calibration_progress')",
-      "arguments": {},
-      "returns": "Up to 200 COMMAND_ACK, STATUSTEXT, accelerometer-position, MAG_CAL_PROGRESS, and MAG_CAL_REPORT events from the current connection"
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "get_stream_server_status",
+      "id": "finish_radio_calibration",
       "transport": "tauri-command",
-      "frontendCall": "await invoke('get_stream_server_status')",
-      "arguments": {},
-      "returns": "running, bindAddress, websocketPath, calibrationWebsocketPath, and lastError"
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "attitude_websocket",
-      "transport": "websocket",
-      "url": "ws://127.0.0.1:8000/ws/gyro",
-      "frontendCall": "new WebSocket('ws://127.0.0.1:8000/ws/gyro')",
-      "serverMessages": {
-        "shape": { "alpha": "yaw degrees", "beta": "roll degrees", "gamma": "negative pitch degrees", "source": "mavlink" },
-        "rate": "up to the requested ATTITUDE rate (20 Hz)"
-      },
-      "notes": "The listener binds 0.0.0.0 for the existing phone-orientation feature, while the desktop frontend should connect through 127.0.0.1."
+      "id": "cancel_radio_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
-      "id": "calibration_websocket",
-      "transport": "websocket",
-      "url": "ws://127.0.0.1:8000/ws/calibration",
-      "frontendCall": "new WebSocket('ws://127.0.0.1:8000/ws/calibration')",
-      "direction": "server-to-client only; client messages are ignored",
-      "serverMessages": {
-        "shape": {
-          "type": "calibrationEvent",
-          "payload": {
-            "eventType": "commandAck|statusText|accelerometerPosition|magCalProgress|magCalReport",
-            "message": "human-readable flight-controller report",
-            "severity": "MAV_SEVERITY number|null",
-            "command": "MAV_CMD number|null",
-            "result": "MAV_RESULT number|null",
-            "progress": "0..100|null",
-            "receivedAtMs": "Unix milliseconds"
-          }
-        }
-      },
-      "recovery": "After opening or reconnecting, invoke get_current_calibration and get_calibration_progress because WebSocket delivery is live and does not replay old messages."
-    }
-  ],
-  "developmentTools": [
+      "id": "esc_capabilities",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
     {
-      "id": "mavlink_monitor",
-      "location": "src/bin/mavlink_monitor.rs",
-      "purpose": "Legacy backend-only hardware diagnostic CLI. The Tauri commands above are the application API and use the official MAVLink transport."
+      "id": "esc_protocol_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "esc_steps",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "start_esc_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": true
+    },
+    {
+      "id": "advance_esc_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": true
+    },
+    {
+      "id": "esc_calibration_status",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "cancel_esc_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "flight_mode_configuration",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "flight_mode_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "set_flight_mode_configuration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
+    },
+    {
+      "id": "failsafe_configuration",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "failsafe_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "set_failsafe_configuration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
+    },
+    {
+      "id": "battery_configuration",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "battery_monitor_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "set_battery_configuration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
+    },
+    {
+      "id": "calibrate_battery_voltage",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": false
+    },
+    {
+      "id": "run_motor_test",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": true,
+      "manualConfirmation": true
+    },
+    {
+      "id": "radio_calibration_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "continue_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "stop_calibration",
+      "transport": "tauri-command",
+      "access": "writes-state-or-firmware",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     }
   ]
 }

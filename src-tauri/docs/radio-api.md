@@ -22,10 +22,20 @@ intended neutral positions before starting if trim capture is enabled.
 {
   "request": {
     "capture_min_max": true,
-    "capture_trim": true
+    "capture_trim": true,
+    "channels": [1, 2, 3, 4, 5, 6]
   }
 }
 ```
+
+`channels` is optional for backward compatibility. When supplied, only those
+live channels are validated and written. When omitted, Datum saves channels
+that completed the required 400 microseconds of travel, so unused fixed
+receiver channels do not block calibration. Trim is captured from each live
+value when calibration starts.
+
+Use `radio_calibration_options` to read live channel numbers, channel bounds,
+minimum travel, and trim behavior before starting.
 
 Move every relevant stick, knob, and switch through its full range. Datum
 rejects captured ranges narrower than 400 microseconds.

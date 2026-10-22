@@ -1,8 +1,12 @@
-use datum_lib::mavlink::{
+#[path = "../mavlink.rs"]
+mod mavlink;
+#[path = "../server.rs"]
+mod server;
+
+use mavlink::{
     command_long_v1, Attitude, Heartbeat, MavlinkMessage, MavlinkParser, SystemStatus,
     MAV_CMD_PREFLIGHT_CALIBRATION,
 };
-use datum_lib::server;
 use std::{
     collections::HashSet,
     env,
@@ -227,7 +231,7 @@ fn run() -> Result<(), String> {
 }
 
 fn start_phone_gyro_fallback_server() {
-    server::start();
+    let _ = server::start();
     println!("WebSocket attitude stream available at ws://127.0.0.1:8000/ws/gyro.");
     println!("Phone gyro fallback is active while the drone is disconnected.");
     println!("Open the app's /sender page on a phone and tap Start Sharing Gyroscope.");
