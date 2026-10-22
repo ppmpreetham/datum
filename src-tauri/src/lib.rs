@@ -1,4 +1,5 @@
 mod calibration;
+mod endpoint_manifest;
 mod server;
 
 #[tauri::command]

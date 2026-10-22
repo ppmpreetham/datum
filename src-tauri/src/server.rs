@@ -7,15 +7,33 @@ use axum::{
     Router,
 };
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::broadcast;
 
 struct AppState {
     tx: broadcast::Sender<String>,
 }
 
+static GYRO_SENDER: OnceLock<broadcast::Sender<String>> = OnceLock::new();
+
+#[allow(dead_code)]
+pub fn publish_drone_attitude(roll_rad: f32, pitch_rad: f32, yaw_rad: f32) {
+    let Some(sender) = GYRO_SENDER.get() else {
+        return;
+    };
+    let message = serde_json::json!({
+        "alpha": yaw_rad.to_degrees(),
+        "beta": roll_rad.to_degrees(),
+        "gamma": -pitch_rad.to_degrees(),
+        "source": "mavlink"
+    })
+    .to_string();
+    let _ = sender.send(message);
+}
+
 pub fn start() {
     let (tx, _rx) = broadcast::channel(100);
+    let _ = GYRO_SENDER.set(tx.clone());
     let app_state = Arc::new(AppState { tx });
 
     tauri::async_runtime::spawn(async move {

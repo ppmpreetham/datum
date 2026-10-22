@@ -1,8 +1,12 @@
-use datum_lib::mavlink::{
+#[path = "../mavlink.rs"]
+mod mavlink;
+#[path = "../server.rs"]
+mod server;
+
+use mavlink::{
     command_long_v1, Attitude, Heartbeat, MavlinkMessage, MavlinkParser, SystemStatus,
     MAV_CMD_PREFLIGHT_CALIBRATION,
 };
-use datum_lib::server;
 use std::{
     collections::HashSet,
     env,
