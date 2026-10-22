@@ -642,6 +642,7 @@ struct PendingFrameWrite {
     type_seen: Option<f32>,
     verifying: bool,
     started: Instant,
+    attempts: u8,
     reply: mpsc::Sender<Result<FrameUpdateResponse, String>>,
 }
 
@@ -650,6 +651,7 @@ struct PendingParameterWrite {
     seen: BTreeMap<String, f32>,
     verifying: bool,
     started: Instant,
+    attempts: u8,
     reply: mpsc::Sender<Result<(), String>>,
 }
 
@@ -657,6 +659,7 @@ struct PendingParameterRead {
     names: Vec<String>,
     values: BTreeMap<String, f32>,
     started: Instant,
+    attempts: u8,
     reply: mpsc::Sender<Result<BTreeMap<String, f32>, String>>,
 }
 
@@ -1977,6 +1980,7 @@ fn run_vehicle(
         Option<f32>,
         Option<f32>,
         Instant,
+        u8,
     )> = None;
     let mut pending_frame_write: Option<PendingFrameWrite> = None;
     let mut pending_parameter_write: Option<PendingParameterWrite> = None;
@@ -2017,7 +2021,11 @@ fn run_vehicle(
                     type_value,
                     reply,
                 } => {
-                    if pending_frame_read.is_some() || pending_frame_write.is_some() {
+                    if pending_frame_read.is_some()
+                        || pending_frame_write.is_some()
+                        || pending_parameter_read.is_some()
+                        || pending_parameter_write.is_some()
+                    {
                         let _ = reply.send(Err(
                             "Another frame parameter operation is already in progress.".into(),
                         ));
@@ -2066,12 +2074,17 @@ fn run_vehicle(
                             type_seen: None,
                             verifying: false,
                             started: Instant::now(),
+                            attempts: 0,
                             reply,
                         });
                     }
                 }
                 WorkerCommand::ReadFrame(reply) => {
-                    if pending_frame_read.is_some() || pending_frame_write.is_some() {
+                    if pending_frame_read.is_some()
+                        || pending_frame_write.is_some()
+                        || pending_parameter_read.is_some()
+                        || pending_parameter_write.is_some()
+                    {
                         let _ = reply
                             .send(Err("A frame parameter read is already in progress.".into()));
                         continue;
@@ -2107,7 +2120,7 @@ fn run_vehicle(
                     if let Some(error) = send_error {
                         let _ = reply.send(Err(error));
                     } else {
-                        pending_frame_read = Some((reply, None, None, Instant::now()));
+                        pending_frame_read = Some((reply, None, None, Instant::now(), 0));
                     }
                 }
                 WorkerCommand::StartCompass {
@@ -2242,8 +2255,14 @@ fn run_vehicle(
                     }
                 }
                 WorkerCommand::ReadParameters { names, reply } => {
-                    if pending_parameter_read.is_some() {
-                        let _ = reply.send(Err("A parameter read is already in progress.".into()));
+                    if pending_parameter_read.is_some()
+                        || pending_parameter_write.is_some()
+                        || pending_frame_read.is_some()
+                        || pending_frame_write.is_some()
+                    {
+                        let _ = reply.send(Err(
+                            "Another parameter operation is already in progress.".into(),
+                        ));
                         continue;
                     }
                     let status = service.0.lock().unwrap().status.clone();
@@ -2281,13 +2300,20 @@ fn run_vehicle(
                             names,
                             values: BTreeMap::new(),
                             started: Instant::now(),
+                            attempts: 0,
                             reply,
                         });
                     }
                 }
                 WorkerCommand::WriteParameters { parameters, reply } => {
-                    if pending_parameter_write.is_some() {
-                        let _ = reply.send(Err("A parameter save is already in progress.".into()));
+                    if pending_parameter_write.is_some()
+                        || pending_parameter_read.is_some()
+                        || pending_frame_read.is_some()
+                        || pending_frame_write.is_some()
+                    {
+                        let _ = reply.send(Err(
+                            "Another parameter operation is already in progress.".into(),
+                        ));
                         continue;
                     }
                     let status = service.0.lock().unwrap().status.clone();
@@ -2327,6 +2353,7 @@ fn run_vehicle(
                             seen: BTreeMap::new(),
                             verifying: false,
                             started: Instant::now(),
+                            attempts: 0,
                             reply,
                         });
                     }
@@ -2796,6 +2823,7 @@ fn run_vehicle(
                                         write.seen.clear();
                                         write.verifying = true;
                                         write.started = Instant::now();
+                                        write.attempts = 0;
                                         pending_parameter_write = Some(write);
                                     }
                                 }
@@ -2864,6 +2892,7 @@ fn run_vehicle(
                                         write.type_seen = None;
                                         write.verifying = true;
                                         write.started = Instant::now();
+                                        write.attempts = 0;
                                         pending_frame_write = Some(write);
                                     }
                                 } else {
@@ -2877,26 +2906,23 @@ fn run_vehicle(
                             pending_frame_write = Some(write);
                         }
                     }
-                    if let Some((_, class_value, type_value, _)) = &mut pending_frame_read {
+                    if let Some((_, class_value, type_value, _, _)) = &mut pending_frame_read {
                         match parameter_name {
                             "FRAME_CLASS" => *class_value = Some(parameter.param_value),
                             "FRAME_TYPE" => *type_value = Some(parameter.param_value),
                             _ => {}
                         }
                     }
-                    let completed =
-                        pending_frame_read
-                            .as_ref()
-                            .and_then(|(_, class_value, type_value, _)| {
-                                match (*class_value, *type_value) {
-                                    (Some(class_value), Some(type_value)) => {
-                                        Some(resolve_frame_configuration(class_value, type_value))
-                                    }
-                                    _ => None,
-                                }
-                            });
+                    let completed = pending_frame_read.as_ref().and_then(
+                        |(_, class_value, type_value, _, _)| match (*class_value, *type_value) {
+                            (Some(class_value), Some(type_value)) => {
+                                Some(resolve_frame_configuration(class_value, type_value))
+                            }
+                            _ => None,
+                        },
+                    );
                     if let Some(configuration) = completed {
-                        if let Some((reply, _, _, _)) = pending_frame_read.take() {
+                        if let Some((reply, _, _, _, _)) = pending_frame_read.take() {
                             let _ = reply.send(Ok(configuration));
                         }
                     }
@@ -3188,67 +3214,263 @@ fn run_vehicle(
         }
         if pending_frame_read
             .as_ref()
-            .is_some_and(|(_, _, _, started)| started.elapsed() > Duration::from_secs(5))
+            .is_some_and(|(_, _, _, started, _)| started.elapsed() > Duration::from_millis(900))
         {
-            if let Some((reply, _, _, _)) = pending_frame_read.take() {
-                let _ = reply.send(Err(
-                    "Timed out waiting for FRAME_CLASS or FRAME_TYPE from the flight controller."
-                        .into(),
-                ));
+            if let Some((reply, class_value, type_value, _, attempts)) = pending_frame_read.take() {
+                if attempts >= 4 {
+                    let missing = match (class_value, type_value) {
+                        (None, None) => "FRAME_CLASS and FRAME_TYPE",
+                        (None, Some(_)) => "FRAME_CLASS",
+                        (Some(_), None) => "FRAME_TYPE",
+                        (Some(_), Some(_)) => "no parameters",
+                    };
+                    let _ = reply.send(Err(format!(
+                        "Timed out waiting for {missing} from the flight controller after retries."
+                    )));
+                } else {
+                    let status = service.0.lock().unwrap().status.clone();
+                    if let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    {
+                        for name in [
+                            class_value.is_none().then_some("FRAME_CLASS"),
+                            type_value.is_none().then_some("FRAME_TYPE"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        {
+                            sequence = sequence.wrapping_add(1);
+                            let header = MavHeader {
+                                system_id: 255,
+                                component_id: 190,
+                                sequence,
+                            };
+                            let request = mav::PARAM_REQUEST_READ_DATA {
+                                target_system: system_id,
+                                target_component: component_id,
+                                param_id: parameter_id(name).into(),
+                                param_index: -1,
+                            };
+                            let _ = connection
+                                .send(&header, &mav::MavMessage::PARAM_REQUEST_READ(request));
+                        }
+                    }
+                    pending_frame_read =
+                        Some((reply, class_value, type_value, Instant::now(), attempts + 1));
+                }
             }
         }
         if pending_frame_write
             .as_ref()
-            .is_some_and(|write| write.started.elapsed() > Duration::from_secs(5))
+            .is_some_and(|write| write.started.elapsed() > Duration::from_millis(900))
         {
-            if let Some(write) = pending_frame_write.take() {
-                let phase = if write.verifying {
-                    "readback verification"
+            if let Some(mut write) = pending_frame_write.take() {
+                if write.attempts >= 4 {
+                    let phase = if write.verifying {
+                        "readback verification"
+                    } else {
+                        "parameter write acknowledgement"
+                    };
+                    let _ = write.reply.send(Err(format!(
+                        "Timed out waiting for frame {phase} from the flight controller after retries."
+                    )));
                 } else {
-                    "parameter write acknowledgement"
-                };
-                let _ = write.reply.send(Err(format!(
-                    "Timed out waiting for frame {phase} from the flight controller."
-                )));
+                    let status = service.0.lock().unwrap().status.clone();
+                    if let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    {
+                        let missing = [
+                            ("FRAME_CLASS", write.class_value, write.class_seen.is_none()),
+                            ("FRAME_TYPE", write.type_value, write.type_seen.is_none()),
+                        ];
+                        let mut send_error = None;
+                        for (name, value, is_missing) in missing {
+                            if !is_missing {
+                                continue;
+                            }
+                            sequence = sequence.wrapping_add(1);
+                            let header = MavHeader {
+                                system_id: 255,
+                                component_id: 190,
+                                sequence,
+                            };
+                            let result = if write.verifying {
+                                connection.send(
+                                    &header,
+                                    &mav::MavMessage::PARAM_REQUEST_READ(
+                                        mav::PARAM_REQUEST_READ_DATA {
+                                            target_system: system_id,
+                                            target_component: component_id,
+                                            param_id: parameter_id(name).into(),
+                                            param_index: -1,
+                                        },
+                                    ),
+                                )
+                            } else {
+                                connection.send(
+                                    &header,
+                                    &mav::MavMessage::PARAM_SET(mav::PARAM_SET_DATA {
+                                        target_system: system_id,
+                                        target_component: component_id,
+                                        param_id: parameter_id(name).into(),
+                                        param_value: value,
+                                        param_type: mav::MavParamType::MAV_PARAM_TYPE_REAL32,
+                                    }),
+                                )
+                            };
+                            if let Err(error) = result {
+                                send_error = Some(format!("Could not retry {name}: {error}"));
+                                break;
+                            }
+                        }
+                        if let Some(error) = send_error {
+                            let _ = write.reply.send(Err(error));
+                        } else {
+                            write.attempts += 1;
+                            write.started = Instant::now();
+                            pending_frame_write = Some(write);
+                        }
+                    } else {
+                        let _ = write.reply.send(Err(
+                            "Vehicle identity was lost during frame parameter retries.".into(),
+                        ));
+                    }
+                }
             }
         }
         if pending_parameter_write
             .as_ref()
-            .is_some_and(|write| write.started.elapsed() > Duration::from_secs(10))
+            .is_some_and(|write| write.started.elapsed() > Duration::from_millis(900))
         {
-            if let Some(write) = pending_parameter_write.take() {
+            if let Some(mut write) = pending_parameter_write.take() {
                 let missing = write
                     .expected
                     .keys()
                     .filter(|name| !write.seen.contains_key(*name))
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = write.reply.send(Err(format!(
-                    "Timed out waiting for radio parameter {}: {missing}",
-                    if write.verifying {
-                        "readback"
+                    .collect::<Vec<_>>();
+                if write.attempts >= 4 {
+                    let _ = write.reply.send(Err(format!(
+                        "Timed out waiting for parameter {} after retries: {}",
+                        if write.verifying {
+                            "readback"
+                        } else {
+                            "write acknowledgement"
+                        },
+                        missing.join(", ")
+                    )));
+                } else {
+                    let status = service.0.lock().unwrap().status.clone();
+                    if let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    {
+                        let mut send_error = None;
+                        for name in missing {
+                            sequence = sequence.wrapping_add(1);
+                            let header = MavHeader {
+                                system_id: 255,
+                                component_id: 190,
+                                sequence,
+                            };
+                            let result = if write.verifying {
+                                connection.send(
+                                    &header,
+                                    &mav::MavMessage::PARAM_REQUEST_READ(
+                                        mav::PARAM_REQUEST_READ_DATA {
+                                            target_system: system_id,
+                                            target_component: component_id,
+                                            param_id: parameter_id(&name).into(),
+                                            param_index: -1,
+                                        },
+                                    ),
+                                )
+                            } else {
+                                connection.send(
+                                    &header,
+                                    &mav::MavMessage::PARAM_SET(mav::PARAM_SET_DATA {
+                                        target_system: system_id,
+                                        target_component: component_id,
+                                        param_id: parameter_id(&name).into(),
+                                        param_value: write.expected[&name],
+                                        param_type: mav::MavParamType::MAV_PARAM_TYPE_REAL32,
+                                    }),
+                                )
+                            };
+                            if let Err(error) = result {
+                                send_error = Some(format!("Could not retry {name}: {error}"));
+                                break;
+                            }
+                        }
+                        if let Some(error) = send_error {
+                            let _ = write.reply.send(Err(error));
+                        } else {
+                            write.attempts += 1;
+                            write.started = Instant::now();
+                            pending_parameter_write = Some(write);
+                        }
                     } else {
-                        "write acknowledgement"
+                        let _ = write.reply.send(Err(
+                            "Vehicle identity was lost during parameter retries.".into(),
+                        ));
                     }
-                )));
+                }
             }
         }
         if pending_parameter_read
             .as_ref()
-            .is_some_and(|read| read.started.elapsed() > Duration::from_secs(6))
+            .is_some_and(|read| read.started.elapsed() > Duration::from_millis(900))
         {
-            if let Some(read) = pending_parameter_read.take() {
+            if let Some(mut read) = pending_parameter_read.take() {
                 let missing = read
                     .names
                     .iter()
                     .filter(|name| !read.values.contains_key(*name))
                     .cloned()
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let _ = read
-                    .reply
-                    .send(Err(format!("Timed out reading parameters: {missing}")));
+                    .collect::<Vec<_>>();
+                if read.attempts >= 4 {
+                    let _ = read.reply.send(Err(format!(
+                        "Timed out reading parameters after retries: {}",
+                        missing.join(", ")
+                    )));
+                } else {
+                    let status = service.0.lock().unwrap().status.clone();
+                    if let (Some(system_id), Some(component_id)) =
+                        (status.system_id, status.component_id)
+                    {
+                        let mut send_error = None;
+                        for name in missing {
+                            sequence = sequence.wrapping_add(1);
+                            let header = MavHeader {
+                                system_id: 255,
+                                component_id: 190,
+                                sequence,
+                            };
+                            let request = mav::PARAM_REQUEST_READ_DATA {
+                                target_system: system_id,
+                                target_component: component_id,
+                                param_id: parameter_id(&name).into(),
+                                param_index: -1,
+                            };
+                            if let Err(error) = connection
+                                .send(&header, &mav::MavMessage::PARAM_REQUEST_READ(request))
+                            {
+                                send_error = Some(format!("Could not retry {name}: {error}"));
+                                break;
+                            }
+                        }
+                        if let Some(error) = send_error {
+                            let _ = read.reply.send(Err(error));
+                        } else {
+                            read.attempts += 1;
+                            read.started = Instant::now();
+                            pending_parameter_read = Some(read);
+                        }
+                    } else {
+                        let _ = read.reply.send(Err(
+                            "Vehicle identity was lost during parameter retries.".into(),
+                        ));
+                    }
+                }
             }
         }
         if pending_motor_test
