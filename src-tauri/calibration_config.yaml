@@ -1,0 +1,20 @@
+# Calibration API feature flags.
+#
+# true  = the backend may expose and run the matching calibration API.
+# false = the backend must reject that calibration API as disabled.
+#
+# The file is compiled into the Tauri app. Rebuild/restart the app after editing it.
+# Set a flag true only when the matching Tauri command is implemented and registered.
+# Keep propellers removed during any calibration or motor-related setup.
+api_enabled:
+  accelerometer: true
+  gyroscope: true
+  compass: true
+  level_horizon: true
+  radio_controller: true
+  battery_voltage: false
+  battery_current: false
+  esc_throttle_range: false
+  airspeed: false
+  optical_flow: false
+  imu_temperature_compensation: false

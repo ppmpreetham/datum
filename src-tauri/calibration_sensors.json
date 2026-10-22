@@ -1,0 +1,108 @@
+{
+  "version": "0.1.0",
+  "purpose": "Catalogue of quadcopter calibration actions. The id is the stable backend API key and matches calibration_config.yaml.",
+  "sensors": [
+    {
+      "id": "accelerometer",
+      "name": "Accelerometer",
+      "category": "imu",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Measures gravity and vehicle tilt. The vehicle is placed in several orientations during calibration."
+    },
+    {
+      "id": "gyroscope",
+      "name": "Gyroscope",
+      "category": "imu",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Measures rotation. The vehicle must remain motionless while it establishes its bias."
+    },
+    {
+      "id": "compass",
+      "name": "Compass / Magnetometer",
+      "category": "navigation",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Measures magnetic heading. Recalibrate after moving GPS/compass hardware, wiring, or nearby metal."
+    },
+    {
+      "id": "level_horizon",
+      "name": "Level horizon",
+      "category": "vehicle_setup",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Stores the physical level position. This is a vehicle setup action, not a separate sensor."
+    },
+    {
+      "id": "radio_controller",
+      "name": "Radio controller inputs",
+      "category": "input",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Learns minimum, centre, and maximum values for RC sticks and switches."
+    },
+    {
+      "id": "battery_voltage",
+      "name": "Battery voltage monitor",
+      "category": "power",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": true,
+      "description": "Adjusts voltage scaling to match a multimeter reading."
+    },
+    {
+      "id": "battery_current",
+      "name": "Battery current monitor",
+      "category": "power",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": false,
+      "description": "Adjusts current scaling when a current sensor or power module is installed."
+    },
+    {
+      "id": "esc_throttle_range",
+      "name": "ESC throttle range",
+      "category": "propulsion",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": false,
+      "description": "Used by some PWM/analogue ESCs. Do not use for DShot unless firmware documentation specifically requires it."
+    },
+    {
+      "id": "airspeed",
+      "name": "Airspeed sensor",
+      "category": "navigation",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": false,
+      "description": "Optional; normally used for fixed-wing aircraft rather than a basic quadcopter."
+    },
+    {
+      "id": "optical_flow",
+      "name": "Optical-flow sensor",
+      "category": "navigation",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": false,
+      "description": "Optional; only applicable when an optical-flow module is installed."
+    },
+    {
+      "id": "imu_temperature_compensation",
+      "name": "IMU temperature compensation",
+      "category": "imu",
+      "calibratable": true,
+      "recommendedForBasicQuadcopter": false,
+      "description": "Advanced calibration that compensates IMU bias as temperature changes."
+    }
+  ],
+  "notManualCalibration": [
+    {
+      "id": "gps",
+      "reason": "GPS normally requires configuration and health checks, not manual calibration."
+    },
+    {
+      "id": "barometer",
+      "reason": "Barometer bias is normally handled automatically by the flight controller."
+    },
+    {
+      "id": "motor_order_and_direction",
+      "reason": "This must be verified with a motor test; it is not a sensor calibration."
+    }
+  ]
+}

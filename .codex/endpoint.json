@@ -1,0 +1,77 @@
+{
+  "hardware": [],
+  "software": [
+    {
+      "path": "tauri://list_serial_ports",
+      "method": "invoke",
+      "purpose": "List serial ports and flight-controller likelihood metadata.",
+      "input": {},
+      "output": "SerialPortSummary[]",
+      "owner": "src-tauri/src/drone.rs",
+      "notes": "Read-only discovery."
+    },
+    {
+      "path": "tauri://connect_drone",
+      "method": "invoke",
+      "purpose": "Open a serial link and verify an ArduPilot or PX4 heartbeat.",
+      "input": { "portName": "string", "baudRate": "number|null" },
+      "output": "DroneStatus",
+      "owner": "src-tauri/src/drone.rs",
+      "notes": "One serial-connected controller at a time."
+    },
+    {
+      "path": "tauri://auto_connect_drone",
+      "method": "invoke",
+      "purpose": "Try likely controller ports and baud rates.",
+      "input": { "baudRates": "number[]|null" },
+      "output": "AutoConnectResult",
+      "owner": "src-tauri/src/drone.rs",
+      "notes": "Frontend may retry when no device is present."
+    },
+    {
+      "path": "tauri://start_compass_calibration",
+      "method": "invoke",
+      "purpose": "Start firmware-specific magnetometer calibration.",
+      "input": { "options": "CompassCalibrationOptions|null" },
+      "output": "CalibrationStart",
+      "owner": "src-tauri/src/calibration.rs",
+      "notes": "Options are ArduPilot-only; omit for PX4."
+    },
+    {
+      "path": "tauri://get_current_calibration",
+      "method": "invoke",
+      "purpose": "Read the authoritative active or last calibration session.",
+      "input": {},
+      "output": "CalibrationSession|null",
+      "owner": "src-tauri/src/drone.rs",
+      "notes": "Use to hydrate or recover frontend state."
+    },
+    {
+      "path": "tauri://get_calibration_progress",
+      "method": "invoke",
+      "purpose": "Read retained calibration events.",
+      "input": {},
+      "output": "CalibrationProgressEvent[]",
+      "owner": "src-tauri/src/drone.rs",
+      "notes": "Retains up to 200 events."
+    },
+    {
+      "path": "ws://127.0.0.1:8000/ws/calibration",
+      "method": "WebSocket",
+      "purpose": "Stream live structured calibration events to the frontend.",
+      "input": "client messages ignored",
+      "output": "CalibrationEventMessage",
+      "owner": "src-tauri/src/server.rs",
+      "notes": "No replay; hydrate with Tauri snapshot commands."
+    },
+    {
+      "path": "ws://127.0.0.1:8000/ws/gyro",
+      "method": "WebSocket",
+      "purpose": "Relay phone orientation and MAVLink attitude data.",
+      "input": "phone orientation JSON",
+      "output": "alpha/beta/gamma orientation JSON",
+      "owner": "src-tauri/src/server.rs",
+      "notes": "Binds 0.0.0.0 for the existing phone sender workflow."
+    }
+  ]
+}
