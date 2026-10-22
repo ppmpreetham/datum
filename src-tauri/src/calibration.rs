@@ -797,6 +797,16 @@ fn esc_protocol(value: u8) -> (&'static str, bool) {
     }
 }
 
+fn next_esc_step(current: usize, active: bool, requested_step: &str) -> Result<usize, String> {
+    if !active || current >= ESC_STEPS.len() {
+        return Err("ESC_WORKFLOW_INACTIVE: start a new ESC calibration workflow.".into());
+    }
+    if ESC_STEPS[current].0 != requested_step {
+        return Err("INVALID_STEP: confirm the currently requested ESC workflow step.".into());
+    }
+    Ok(current + 1)
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct FlightModeConfiguration {
     pub mode_channel: u8,
@@ -861,6 +871,28 @@ pub struct MotorTestResponse {
     pub throttle_percent: f32,
     pub duration_seconds: f32,
     pub message: String,
+}
+
+fn motor_test_command(
+    target_system: u8,
+    target_component: u8,
+    motor_number: u8,
+    throttle_percent: f32,
+    duration_seconds: f32,
+) -> mav::COMMAND_LONG_DATA {
+    mav::COMMAND_LONG_DATA {
+        target_system,
+        target_component,
+        command: mav::MavCmd::MAV_CMD_DO_MOTOR_TEST,
+        confirmation: 0,
+        param1: motor_number as f32,
+        param2: 0.0,
+        param3: throttle_percent,
+        param4: duration_seconds,
+        param5: 0.0,
+        param6: 0.0,
+        param7: 0.0,
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1656,10 +1688,10 @@ pub fn advance_esc_calibration(
     if session.esc_session_id.as_deref() != Some(request.session_id.as_str()) {
         return Err("INVALID_SESSION: ESC workflow session does not match.".into());
     }
-    if request.action != "confirm_completed" || ESC_STEPS[session.esc_step].0 != request.step_id {
+    if request.action != "confirm_completed" {
         return Err("INVALID_STEP: confirm the currently requested ESC workflow step.".into());
     }
-    session.esc_step += 1;
+    session.esc_step = next_esc_step(session.esc_step, session.esc_active, &request.step_id)?;
     if session.esc_step >= ESC_STEPS.len() {
         session.esc_active = false;
     }
@@ -2381,19 +2413,13 @@ fn run_vehicle(
                         component_id: 190,
                         sequence,
                     };
-                    let command = mav::COMMAND_LONG_DATA {
-                        target_system: system_id,
-                        target_component: component_id,
-                        command: mav::MavCmd::MAV_CMD_DO_MOTOR_TEST,
-                        confirmation: 0,
-                        param1: motor_number as f32,
-                        param2: 0.0,
-                        param3: throttle_percent,
-                        param4: duration_seconds,
-                        param5: 0.0,
-                        param6: 0.0,
-                        param7: 0.0,
-                    };
+                    let command = motor_test_command(
+                        system_id,
+                        component_id,
+                        motor_number,
+                        throttle_percent,
+                        duration_seconds,
+                    );
                     match connection.send(&header, &mav::MavMessage::COMMAND_LONG(command)) {
                         Ok(_) => {
                             pending_motor_test = Some((
@@ -3615,6 +3641,22 @@ mod tests {
     fn motor_operations_are_disabled() {
         assert!(CalibrationKind::Esc.command(Firmware::ArduPilot).is_err());
         assert!(CalibrationKind::MotorTest.command(Firmware::Px4).is_err());
+    }
+
+    #[test]
+    fn completed_or_cancelled_esc_workflow_cannot_advance() {
+        assert!(next_esc_step(ESC_STEPS.len(), false, ESC_STEPS[4].0).is_err());
+        assert!(next_esc_step(2, false, ESC_STEPS[2].0).is_err());
+    }
+
+    #[test]
+    fn motor_test_uses_percent_throttle_and_bounded_duration() {
+        let command = motor_test_command(1, 1, 2, 5.0, 1.0);
+        assert_eq!(command.command, mav::MavCmd::MAV_CMD_DO_MOTOR_TEST);
+        assert_eq!(command.param1, 2.0);
+        assert_eq!(command.param2, 0.0);
+        assert_eq!(command.param3, 5.0);
+        assert_eq!(command.param4, 1.0);
     }
 
     #[test]
