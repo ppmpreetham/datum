@@ -688,6 +688,7 @@ struct Session {
     battery_current_a: Option<f32>,
     battery_remaining_percent: Option<i8>,
     active_mode: Option<u32>,
+    attitude: Option<AttitudeSample>,
 }
 
 #[derive(Default)]
@@ -745,6 +746,13 @@ fn radio_status(session: &Session) -> RadioCalibrationStatus {
 
 fn radio_range_valid(minimum_us: u16, maximum_us: u16) -> bool {
     maximum_us.saturating_sub(minimum_us) >= 400
+}
+
+/// Channels that never moved during capture are unused outputs (for example
+/// iBUS channels 7-14 on a six-channel transmitter). They are left untouched
+/// rather than blocking the save.
+fn radio_channel_untouched(minimum_us: u16, maximum_us: u16) -> bool {
+    maximum_us.saturating_sub(minimum_us) < 100
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1092,6 +1100,97 @@ fn change(
 #[tauri::command]
 pub fn vehicle_status(service: State<'_, CalibrationService>) -> VehicleStatus {
     service.0.lock().unwrap().status.clone()
+}
+
+/// Vehicle attitude from MAVLink `ATTITUDE`, in the NED body convention
+/// (radians and radians per second).
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct AttitudeSample {
+    pub roll: f32,
+    pub pitch: f32,
+    pub yaw: f32,
+    pub roll_speed: f32,
+    pub pitch_speed: f32,
+    pub yaw_speed: f32,
+    pub time_boot_ms: u32,
+}
+
+#[tauri::command]
+pub fn vehicle_attitude(service: State<'_, CalibrationService>) -> Option<AttitudeSample> {
+    service.0.lock().unwrap().attitude
+}
+
+/// Orientation and sensor-selection parameters the guided setup may touch.
+/// Anything outside this list must go through a dedicated, validated command.
+const SETUP_PARAMETERS: [&str; 12] = [
+    "AHRS_ORIENTATION",
+    "COMPASS_EXTERNAL",
+    "COMPASS_EXTERN2",
+    "COMPASS_EXTERN3",
+    "COMPASS_ORIENT",
+    "COMPASS_ORIENT2",
+    "COMPASS_ORIENT3",
+    "COMPASS_USE",
+    "COMPASS_AUTO_ROT",
+    "SENS_BOARD_ROT",
+    "CAL_MAG0_ROT",
+    "MOT_PWM_TYPE",
+];
+
+const READ_ONLY_SETUP_PARAMETERS: [&str; 1] = ["MOT_PWM_TYPE"];
+
+fn validate_setup_parameter_names<'a>(
+    names: impl IntoIterator<Item = &'a String>,
+    writing: bool,
+) -> Result<(), String> {
+    for name in names {
+        if !SETUP_PARAMETERS.contains(&name.as_str())
+            || (writing && READ_ONLY_SETUP_PARAMETERS.contains(&name.as_str()))
+        {
+            return Err(format!(
+                "UNSUPPORTED_PARAMETER: {name} cannot be {} through the setup parameter API.",
+                if writing { "written" } else { "read" }
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_setup_parameter_values(parameters: &BTreeMap<String, f32>) -> Result<(), String> {
+    if parameters
+        .values()
+        .any(|value| !value.is_finite() || value.fract() != 0.0 || *value < 0.0)
+    {
+        return Err("INVALID_PARAMETER_VALUE: setup parameters are non-negative integers.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn read_vehicle_parameters(
+    names: Vec<String>,
+    service: State<'_, CalibrationService>,
+) -> Result<BTreeMap<String, f32>, String> {
+    if names.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    validate_setup_parameter_names(&names, false)?;
+    let names = names.iter().map(String::as_str).collect::<Vec<_>>();
+    read_parameters(&service, &names)
+}
+
+#[tauri::command]
+pub fn write_vehicle_parameters(
+    parameters: BTreeMap<String, f32>,
+    service: State<'_, CalibrationService>,
+) -> Result<BTreeMap<String, f32>, String> {
+    if parameters.is_empty() {
+        return Ok(parameters);
+    }
+    validate_setup_parameter_names(parameters.keys(), true)?;
+    validate_setup_parameter_values(&parameters)?;
+    write_parameters(&service, parameters.clone())?;
+    Ok(parameters)
 }
 
 #[tauri::command]
@@ -1544,7 +1643,10 @@ pub fn finish_radio_calibration(
             let invalid = session
                 .radio_channels
                 .iter()
-                .filter(|channel| !radio_range_valid(channel.minimum_us, channel.maximum_us))
+                .filter(|channel| {
+                    !radio_range_valid(channel.minimum_us, channel.maximum_us)
+                        && !radio_channel_untouched(channel.minimum_us, channel.maximum_us)
+                })
                 .map(|channel| channel.channel.to_string())
                 .collect::<Vec<_>>();
             if !invalid.is_empty() {
@@ -1553,9 +1655,24 @@ pub fn finish_radio_calibration(
                     invalid.join(", ")
                 ));
             }
+            if !session
+                .radio_channels
+                .iter()
+                .any(|channel| radio_range_valid(channel.minimum_us, channel.maximum_us))
+            {
+                return Err(
+                    "INVALID_RC_RANGE: no channel moved through its range. Move every stick and switch."
+                        .into(),
+                );
+            }
         }
         let mut parameters = BTreeMap::new();
         for channel in &session.radio_channels {
+            if session.radio_capture_min_max
+                && radio_channel_untouched(channel.minimum_us, channel.maximum_us)
+            {
+                continue;
+            }
             if session.radio_capture_min_max {
                 parameters.insert(
                     format!("RC{}_MIN", channel.channel),
@@ -2025,6 +2142,9 @@ fn run_vehicle(
         mpsc::Sender<Result<MotorTestResponse, String>>,
     )> = None;
     let mut last_gcs_heartbeat = Instant::now() - Duration::from_secs(2);
+    let mut last_attitude: Option<Instant> = None;
+    let mut last_attitude_request: Option<Instant> = None;
+    let mut last_attitude_emit = Instant::now() - Duration::from_secs(1);
     loop {
         if last_gcs_heartbeat.elapsed() >= Duration::from_secs(1) {
             sequence = sequence.wrapping_add(1);
@@ -2598,6 +2718,38 @@ fn run_vehicle(
                 }
             }
         }
+        // Live attitude drives the guided calibration visuals. Re-request the
+        // stream whenever it goes quiet (for example after a controller reboot).
+        let attitude_stale =
+            last_attitude.is_none_or(|time| time.elapsed() > Duration::from_secs(3));
+        let request_due =
+            last_attitude_request.is_none_or(|time| time.elapsed() > Duration::from_secs(3));
+        if attitude_stale && request_due && last_heartbeat.is_some() {
+            let status = service.0.lock().unwrap().status.clone();
+            if let (Some(system_id), Some(component_id)) = (status.system_id, status.component_id) {
+                sequence = sequence.wrapping_add(1);
+                let header = MavHeader {
+                    system_id: 255,
+                    component_id: 190,
+                    sequence,
+                };
+                let request = mav::COMMAND_LONG_DATA {
+                    target_system: system_id,
+                    target_component: component_id,
+                    command: mav::MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL,
+                    confirmation: 0,
+                    param1: 30.0, // ATTITUDE
+                    param2: 40_000.0,
+                    param3: 0.0,
+                    param4: 0.0,
+                    param5: 0.0,
+                    param6: 0.0,
+                    param7: 0.0,
+                };
+                let _ = connection.send(&header, &mav::MavMessage::COMMAND_LONG(request));
+                last_attitude_request = Some(Instant::now());
+            }
+        }
         if let Ok((header, message)) = connection.try_recv() {
             let selected_system = service.0.lock().unwrap().status.system_id;
             if selected_system.is_some_and(|id| id != header.system_id) {
@@ -2705,6 +2857,12 @@ fn run_vehicle(
                             let ardupilot_compass = kind == CalibrationKind::Compass
                                 && service.0.lock().unwrap().status.firmware
                                     == Some(Firmware::ArduPilot);
+                            // ArduPilot runs gyro and level calibration before it
+                            // acknowledges, so ACCEPTED is the final result (as in QGC).
+                            let ardupilot_synchronous =
+                                matches!(kind, CalibrationKind::Gyro | CalibrationKind::Level)
+                                    && service.0.lock().unwrap().status.firmware
+                                        == Some(Firmware::ArduPilot);
                             let (phase, text) = match ack.result {
                                 mav::MavResult::MAV_RESULT_IN_PROGRESS => {
                                     (CalibrationPhase::InProgress, "Calibration in progress")
@@ -2729,10 +2887,14 @@ fn run_vehicle(
                                         "Compass calibration in progress; waiting for reports",
                                     )
                                 }
-                                mav::MavResult::MAV_RESULT_ACCEPTED if prior_in_progress => (
-                                    CalibrationPhase::Completed,
-                                    "Calibration completed according to the flight controller",
-                                ),
+                                mav::MavResult::MAV_RESULT_ACCEPTED
+                                    if prior_in_progress || ardupilot_synchronous =>
+                                {
+                                    (
+                                        CalibrationPhase::Completed,
+                                        "Calibration completed according to the flight controller",
+                                    )
+                                }
                                 mav::MavResult::MAV_RESULT_ACCEPTED => (
                                     CalibrationPhase::Accepted,
                                     "Request accepted; waiting for completion confirmation",
@@ -3053,6 +3215,30 @@ fn run_vehicle(
                         }
                         s.radio_channels.sort_by_key(|channel| channel.channel);
                     });
+                }
+                mav::MavMessage::ATTITUDE(attitude) => {
+                    last_attitude = Some(Instant::now());
+                    let sample = AttitudeSample {
+                        roll: attitude.roll,
+                        pitch: attitude.pitch,
+                        yaw: attitude.yaw,
+                        roll_speed: attitude.rollspeed,
+                        pitch_speed: attitude.pitchspeed,
+                        yaw_speed: attitude.yawspeed,
+                        time_boot_ms: attitude.time_boot_ms,
+                    };
+                    {
+                        let mut session = service.0.lock().unwrap();
+                        if session.generation != generation {
+                            return;
+                        }
+                        session.attitude = Some(sample);
+                    }
+                    // The UI interpolates between samples, so ~30 Hz keeps IPC light.
+                    if last_attitude_emit.elapsed() >= Duration::from_millis(33) {
+                        let _ = app.emit("datum://attitude", sample);
+                        last_attitude_emit = Instant::now();
+                    }
                 }
                 mav::MavMessage::SYS_STATUS(status) => {
                     change(&app, &service, generation, |s| {
@@ -3539,6 +3725,32 @@ mod tests {
         assert_eq!(json["usbVendorId"], 9900);
         assert_eq!(json["usbProductId"], 17);
         assert_eq!(json["product"], "Legacy FMU");
+    }
+
+    #[test]
+    fn untouched_radio_channels_are_skipped_not_rejected() {
+        assert!(radio_channel_untouched(1500, 1500));
+        assert!(radio_channel_untouched(1495, 1590));
+        assert!(!radio_channel_untouched(1400, 1600));
+        assert!(!radio_channel_untouched(1000, 2000));
+    }
+
+    #[test]
+    fn setup_parameter_api_is_allowlisted() {
+        let allowed = vec![
+            "AHRS_ORIENTATION".to_string(),
+            "COMPASS_EXTERNAL".to_string(),
+        ];
+        assert!(validate_setup_parameter_names(&allowed, true).is_ok());
+        let rejected = vec!["ARMING_CHECK".to_string()];
+        assert!(validate_setup_parameter_names(&rejected, false).is_err());
+        let read_only = vec!["MOT_PWM_TYPE".to_string()];
+        assert!(validate_setup_parameter_names(&read_only, false).is_ok());
+        assert!(validate_setup_parameter_names(&read_only, true).is_err());
+        let fractional = BTreeMap::from([("AHRS_ORIENTATION".to_string(), 2.5)]);
+        assert!(validate_setup_parameter_values(&fractional).is_err());
+        let rotation = BTreeMap::from([("AHRS_ORIENTATION".to_string(), 8.0)]);
+        assert!(validate_setup_parameter_values(&rotation).is_ok());
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             calibration::vehicle_status,
+            calibration::vehicle_attitude,
+            calibration::read_vehicle_parameters,
+            calibration::write_vehicle_parameters,
             calibration::list_serial_ports,
             calibration::calibration_options,
             calibration::frame_options,
