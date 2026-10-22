@@ -50,6 +50,23 @@ MAVLink compass mask.
 }
 ```
 
+The response also includes dynamic backend guidance:
+
+```json
+{
+  "guidance": {
+    "text": "Tilt the nose downward and rotate slowly to expose new orientations.",
+    "source": "backend_heuristic",
+    "progress_percent": 55
+  }
+}
+```
+
+The frontend may poll `compass_calibration_status` once per second. Polling
+reads cached state and sends no extra MAVLink request. ArduPilot does not name
+a requested X, Y, or Z axis, so guidance is explicitly heuristic; firmware
+percentage, fitness, result, and saved state remain authoritative.
+
 Progress comes directly from `MAG_CAL_PROGRESS.completion_pct`. Fitness and
 failure state come directly from `MAG_CAL_REPORT`. Datum does not create a
 quality score from elapsed time or completion percentage. Until a report is

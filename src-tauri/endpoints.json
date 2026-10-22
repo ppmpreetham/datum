@@ -198,6 +198,13 @@
       "manualConfirmation": false
     },
     {
+      "id": "esc_protocol_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
       "id": "esc_steps",
       "transport": "tauri-command",
       "access": "read-only",
@@ -240,6 +247,13 @@
       "manualConfirmation": false
     },
     {
+      "id": "flight_mode_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
       "id": "set_flight_mode_configuration",
       "transport": "tauri-command",
       "access": "writes-state-or-firmware",
@@ -254,6 +268,13 @@
       "manualConfirmation": false
     },
     {
+      "id": "failsafe_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
       "id": "set_failsafe_configuration",
       "transport": "tauri-command",
       "access": "writes-state-or-firmware",
@@ -262,6 +283,13 @@
     },
     {
       "id": "battery_configuration",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
+    },
+    {
+      "id": "battery_monitor_options",
       "transport": "tauri-command",
       "access": "read-only",
       "requiresDisarmed": false,
@@ -287,6 +315,13 @@
       "access": "writes-state-or-firmware",
       "requiresDisarmed": true,
       "manualConfirmation": true
+    },
+    {
+      "id": "radio_calibration_options",
+      "transport": "tauri-command",
+      "access": "read-only",
+      "requiresDisarmed": false,
+      "manualConfirmation": false
     },
     {
       "id": "continue_calibration",
