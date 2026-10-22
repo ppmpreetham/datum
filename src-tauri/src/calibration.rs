@@ -3483,7 +3483,11 @@ fn run_vehicle(
                 ));
             }
         }
-        thread::sleep(Duration::from_millis(20));
+        // A 115200-baud ArduPilot link can deliver substantially more than 50
+        // MAVLink packets per second. Sleeping 20 ms after every single receive
+        // allowed telemetry to build an unbounded backlog, hiding command ACKs
+        // and interactive accelerometer position requests behind older packets.
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
